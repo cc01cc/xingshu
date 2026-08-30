@@ -186,6 +186,40 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Task' }
         '404': { $ref: '#/components/responses/ProblemResponse' }
+  /api/v1/tasks/{taskId}/conflicts:
+    get:
+      operationId: listTaskConflicts
+      parameters:
+        - { $ref: '#/components/parameters/TaskId' }
+      responses:
+        '200':
+          description: Repository conflicts requiring a decision
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TaskConflict' }
+        '404': { $ref: '#/components/responses/ProblemResponse' }
+  /api/v1/tasks/{taskId}/repos/{repoId}/decision:
+    post:
+      operationId: decideTaskRepoConflict
+      parameters:
+        - { $ref: '#/components/parameters/TaskId' }
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskRepoDecision' }
+      responses:
+        '202':
+          description: Conflict decision accepted for asynchronous execution
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskDecisionAccepted' }
+        '400': { $ref: '#/components/responses/ProblemResponse' }
+        '404': { $ref: '#/components/responses/ProblemResponse' }
+        '409': { $ref: '#/components/responses/TaskDecisionConflict' }
   /api/v1/tasks/{taskId}/stream:
     get:
       operationId: streamTask
@@ -311,20 +345,23 @@ components:
       required: [type]
       properties:
         type: { type: string, enum: [scan, pull] }
+        conflictMode: { type: string, enum: [policy, ask], default: policy, description: Use ask to keep conflicts waiting for an explicit repository decision }
     TaskAccepted:
       type: object
-      required: [taskId, operationId, status]
+      required: [taskId, operationId, status, conflictMode]
       properties:
         taskId: { type: string }
         operationId: { type: string }
         status: { type: string, const: pending }
+        conflictMode: { type: string, enum: [policy, ask] }
     Task:
       type: object
-      required: [taskId, type, status, requestId, operationId, progressCurrent, progressTotal, lastRepo, lastResult, error, resultJson, createdAt, updatedAt]
+      required: [taskId, type, status, conflictMode, requestId, operationId, progressCurrent, progressTotal, lastRepo, lastResult, error, resultJson, createdAt, updatedAt]
       properties:
         taskId: { type: string }
         type: { type: string, enum: [scan, pull] }
-        status: { type: string, enum: [pending, running, completed, failed, interrupted] }
+        status: { type: string, enum: [pending, running, waiting_for_decision, completed, failed, interrupted] }
+        conflictMode: { type: string, enum: [policy, ask] }
         requestId: { type: [string, 'null'] }
         operationId: { type: string }
         progressCurrent: { type: [integer, 'null'], minimum: 0 }
@@ -335,6 +372,52 @@ components:
         resultJson: { type: [string, 'null'] }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    TaskConflict:
+      type: object
+      required: [taskId, repoId, repoName, repoPath, status, conflictReason, allowedActions, requestedAction, result, durationMs, backupPath, error]
+      properties:
+        taskId: { type: string }
+        repoId: { type: integer, minimum: 1 }
+        repoName: { type: string }
+        repoPath: { type: string }
+        status: { type: string, enum: [waiting_decision, resolving, failed, interrupted] }
+        conflictReason: { type: [string, 'null'] }
+        allowedActions: { type: array, items: { type: string, enum: [backup, overwrite, abort] } }
+        requestedAction: { type: [string, 'null'], enum: [backup, overwrite, abort, null] }
+        result: { type: [string, 'null'] }
+        durationMs: { type: [integer, 'null'], minimum: 0 }
+        backupPath: { type: [string, 'null'] }
+        error: { type: [string, 'null'] }
+    TaskRepoDecision:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [backup, overwrite, abort] }
+    TaskDecisionAccepted:
+      type: object
+      required: [taskId, repoId, status, action]
+      properties:
+        taskId: { type: string }
+        repoId: { type: integer, minimum: 1 }
+        status: { type: string, const: resolving }
+        action: { type: string, enum: [backup, overwrite, abort] }
+    TaskEvent:
+      type: object
+      properties:
+        sequence: { type: integer, minimum: 1 }
+        event: { type: string }
+        taskId: { type: string }
+        repoId: { type: [integer, 'null'], minimum: 1 }
+        repoStatus: { type: [string, 'null'] }
+        conflictReason: { type: [string, 'null'] }
+        requestedAction: { type: [string, 'null'] }
+        backupPath: { type: [string, 'null'] }
+        current: { type: [integer, 'null'], minimum: 0 }
+        total: { type: [integer, 'null'], minimum: 0 }
+        lastRepo: { type: [string, 'null'] }
+        lastResult: { type: [string, 'null'] }
+        error: { type: [string, 'null'] }
+        durationMs: { type: [integer, 'null'], minimum: 0 }
     TagReference:
       type: object
       required: [slug]
@@ -373,6 +456,11 @@ components:
            schema: { $ref: '#/components/schemas/Problem' }
     TaskBusy:
       description: A task of the same type is already running
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TaskDecisionConflict:
+      description: The task repository is no longer waiting for a decision
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

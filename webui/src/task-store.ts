@@ -1,13 +1,14 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 
 export type TaskType = "scan" | "pull";
-export type TaskStatus = "pending" | "running" | "completed" | "failed" | "interrupted";
+export type TaskStatus = "pending" | "running" | "waiting_for_decision" | "completed" | "failed" | "interrupted";
 export type TaskConnection = "idle" | "connecting" | "connected" | "reconnecting" | "closed" | "error";
 
 export type Task = {
   taskId: string;
   type: TaskType;
   status: TaskStatus;
+  conflictMode: "policy" | "ask";
   requestId: string | null;
   operationId: string;
   progressCurrent: number | null;
@@ -20,8 +21,28 @@ export type Task = {
   updatedAt: string;
 };
 
+export type TaskConflict = {
+  taskId: string;
+  repoId: number;
+  repoName: string;
+  repoPath: string;
+  status: "waiting_decision" | "resolving" | "failed" | "interrupted";
+  conflictReason: string | null;
+  allowedActions: Array<"backup" | "overwrite" | "abort">;
+  requestedAction: "backup" | "overwrite" | "abort" | null;
+  result: string | null;
+  durationMs: number | null;
+  backupPath: string | null;
+  error: string | null;
+};
+
 type TaskEvent = {
   taskId: string;
+  repoId?: number | null;
+  repoStatus?: string | null;
+  conflictReason?: string | null;
+  requestedAction?: string | null;
+  backupPath?: string | null;
   event?: string;
   current?: number | null;
   total?: number | null;
@@ -49,11 +70,13 @@ function parseTask(value: unknown): Task | null {
   if (!isRecord(value) || typeof value.taskId !== "string") return null;
   const type = value.type === "pull" ? "pull" : value.type === "scan" ? "scan" : null;
   const status = typeof value.status === "string" ? value.status : null;
-  if (!type || !status || !["pending", "running", "completed", "failed", "interrupted"].includes(status)) return null;
+  if (!type || !status || !["pending", "running", "waiting_for_decision", "completed", "failed", "interrupted"].includes(status)) return null;
+  const conflictMode = value.conflictMode === "ask" ? "ask" : "policy";
   return {
     taskId: value.taskId,
     type,
     status: status as TaskStatus,
+    conflictMode,
     requestId: asNullableString(value.requestId),
     operationId: typeof value.operationId === "string" ? value.operationId : "",
     progressCurrent: asNullableNumber(value.progressCurrent),
@@ -71,6 +94,11 @@ function parseEvent(value: unknown): TaskEvent | null {
   if (!isRecord(value) || typeof value.taskId !== "string") return null;
   return {
     taskId: value.taskId,
+    repoId: asNullableNumber(value.repoId),
+    repoStatus: asNullableString(value.repoStatus),
+    conflictReason: asNullableString(value.conflictReason),
+    requestedAction: asNullableString(value.requestedAction),
+    backupPath: asNullableString(value.backupPath),
     event: typeof value.event === "string" ? value.event : undefined,
     current: asNullableNumber(value.current),
     total: asNullableNumber(value.total),
@@ -78,6 +106,47 @@ function parseEvent(value: unknown): TaskEvent | null {
     lastResult: asNullableString(value.lastResult),
     error: asNullableString(value.error),
     durationMs: asNullableNumber(value.durationMs),
+  };
+}
+
+function parseConflict(value: unknown): TaskConflict | null {
+  if (!isRecord(value) || typeof value.taskId !== "string") return null;
+  const repoId = asNullableNumber(value.repoId);
+  const status = value.status;
+  if (
+    repoId === null ||
+    !Number.isInteger(repoId) ||
+    typeof value.repoName !== "string" ||
+    typeof value.repoPath !== "string" ||
+    !["waiting_decision", "resolving", "failed", "interrupted"].includes(String(status))
+  ) {
+    return null;
+  }
+  const allowedActions = Array.isArray(value.allowedActions)
+    ? value.allowedActions.filter(
+        (action): action is "backup" | "overwrite" | "abort" =>
+          action === "backup" || action === "overwrite" || action === "abort",
+      )
+    : [];
+  const requestedAction =
+    value.requestedAction === "backup" ||
+    value.requestedAction === "overwrite" ||
+    value.requestedAction === "abort"
+      ? value.requestedAction
+      : null;
+  return {
+    taskId: value.taskId,
+    repoId,
+    repoName: value.repoName,
+    repoPath: value.repoPath,
+    status: status as TaskConflict["status"],
+    conflictReason: asNullableString(value.conflictReason),
+    allowedActions,
+    requestedAction,
+    result: asNullableString(value.result),
+    durationMs: asNullableNumber(value.durationMs),
+    backupPath: asNullableString(value.backupPath),
+    error: asNullableString(value.error),
   };
 }
 
@@ -94,6 +163,7 @@ async function responseError(response: Response): Promise<Error> {
 
 export function useTaskStore() {
   const task = ref<Task | null>(null);
+  const taskConflicts = ref<TaskConflict[]>([]);
   const connection = ref<TaskConnection>("idle");
   const error = ref("");
   const progressPercent = computed(() => {
@@ -144,10 +214,24 @@ export function useTaskStore() {
     return parsed;
   }
 
+  async function loadConflicts(taskId: string): Promise<void> {
+    const response = await fetch(`/api/v1/tasks/${encodeURIComponent(taskId)}/conflicts`);
+    if (!response.ok) throw await responseError(response);
+    const value: unknown = await response.json();
+    if (!Array.isArray(value)) throw new Error("冲突响应格式无效");
+    const parsed = value.map(parseConflict).filter((item): item is TaskConflict => item !== null);
+    if (activeTaskId === taskId) taskConflicts.value = parsed;
+  }
+
   async function refresh(taskId: string): Promise<Task> {
     const next = await getTask(taskId);
     if (activeTaskId !== taskId) return next;
     task.value = next;
+    if (next.type === "pull") {
+      await loadConflicts(taskId);
+    } else {
+      taskConflicts.value = [];
+    }
     if (TERMINAL_STATUSES.has(next.status)) stopConnection("closed");
     return next;
   }
@@ -165,7 +249,13 @@ export function useTaskStore() {
     const eventName = next.event ?? message.type;
     task.value = {
       ...task.value,
-      status: eventName === "completed" ? "completed" : eventName === "failed" ? "failed" : "running",
+      status: eventName === "completed"
+        ? "completed"
+        : eventName === "failed"
+          ? "failed"
+          : eventName === "waiting_for_decision"
+            ? "waiting_for_decision"
+            : "running",
       progressCurrent: next.current ?? task.value.progressCurrent,
       progressTotal: next.total ?? task.value.progressTotal,
       lastRepo: next.lastRepo ?? task.value.lastRepo,
@@ -173,6 +263,11 @@ export function useTaskStore() {
       error: next.error ?? task.value.error,
       updatedAt: new Date().toISOString(),
     };
+    if (eventName === "conflict" || eventName === "decision_started" || eventName === "decision_applied" || eventName === "decision_failed") {
+      void loadConflicts(next.taskId).catch((reason) => {
+        error.value = reason instanceof Error ? reason.message : "无法读取冲突状态";
+      });
+    }
     if (eventName === "completed" || eventName === "failed") {
       stopConnection("closed");
       void refresh(next.taskId).catch((reason) => {
@@ -192,6 +287,13 @@ export function useTaskStore() {
     const next = parseTask(value);
     if (!next || next.taskId !== activeTaskId) return;
     task.value = next;
+    if (next.type === "pull") {
+      void loadConflicts(next.taskId).catch((reason) => {
+        error.value = reason instanceof Error ? reason.message : "无法读取冲突状态";
+      });
+    } else {
+      taskConflicts.value = [];
+    }
     if (TERMINAL_STATUSES.has(next.status)) stopConnection("closed");
   }
 
@@ -239,7 +341,18 @@ export function useTaskStore() {
       void fallbackAndReconnect(taskId);
     };
     source.addEventListener("snapshot", (event: Event) => applySnapshot(event as MessageEvent<string>));
-    for (const eventName of ["started", "progress", "completed", "failed"]) {
+    for (const eventName of [
+      "started",
+      "progress",
+      "conflict",
+      "waiting_for_decision",
+      "decision_started",
+      "decision_applied",
+      "decision_failed",
+      "repo_completed",
+      "completed",
+      "failed",
+    ]) {
       source.addEventListener(eventName, (event: Event) => applyEvent(event as MessageEvent<string>));
     }
   }
@@ -247,12 +360,13 @@ export function useTaskStore() {
   async function start(type: TaskType): Promise<void> {
     stopConnection("idle");
     task.value = null;
+    taskConflicts.value = [];
     activeTaskId = null;
     error.value = "";
     const response = await fetch("/api/v1/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type }),
+      body: JSON.stringify({ type, ...(type === "pull" ? { conflictMode: "ask" } : {}) }),
     });
     if (!response.ok) throw await responseError(response);
     const created: unknown = await response.json();
@@ -261,6 +375,7 @@ export function useTaskStore() {
     const initial = parseTask({
       ...created,
       type,
+      conflictMode: type === "pull" ? "ask" : "policy",
       requestId: null,
       progressCurrent: 0,
       progressTotal: null,
@@ -281,10 +396,28 @@ export function useTaskStore() {
     if (isBusy.value) connect(activeTaskId);
   }
 
+  async function decide(
+    repoId: number,
+    action: "backup" | "overwrite" | "abort",
+  ): Promise<void> {
+    if (!activeTaskId) return;
+    const response = await fetch(
+      `/api/v1/tasks/${encodeURIComponent(activeTaskId)}/repos/${repoId}/decision`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      },
+    );
+    if (!response.ok) throw await responseError(response);
+    await loadConflicts(activeTaskId);
+  }
+
   function dismiss(): void {
     activeTaskId = null;
     stopConnection("idle");
     task.value = null;
+    taskConflicts.value = [];
     error.value = "";
   }
 
@@ -293,5 +426,18 @@ export function useTaskStore() {
     stopConnection("idle");
   });
 
-  return { task, connection, connectionLabel, error, progressPercent, isBusy, start, refresh, dismiss };
+  return {
+    task,
+    taskConflicts,
+    connection,
+    connectionLabel,
+    error,
+    progressPercent,
+    isBusy,
+    start,
+    refresh,
+    loadConflicts,
+    decide,
+    dismiss,
+  };
 }

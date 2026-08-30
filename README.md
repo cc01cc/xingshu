@@ -37,7 +37,7 @@ $task = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:12681/api/v1/tasks 
 Invoke-RestMethod "http://127.0.0.1:12681/api/v1/tasks/$($task.taskId)"
 ```
 
-实时进度通过 `GET /api/v1/tasks/{taskId}/stream` 的 SSE 返回；同步 `POST /api/v1/scan` 和单仓 pull 仍保留给脚本兼容。
+批量 pull 可请求人工冲突决策：`{"type":"pull","conflictMode":"ask"}`。通过 `GET /api/v1/tasks/{taskId}/conflicts` 查询冲突，再向 `POST /api/v1/tasks/{taskId}/repos/{repoId}/decision` 提交 `backup`、`overwrite` 或 `abort`。实时进度通过 `GET /api/v1/tasks/{taskId}/stream` 的 SSE 返回；同步 `POST /api/v1/scan` 和单仓 pull 仍保留给脚本兼容。
 
 ## CLI
 

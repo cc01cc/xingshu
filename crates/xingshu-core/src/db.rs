@@ -5,11 +5,12 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::types::{
-    FetchLog, Policy, RepoKind, RepoRecord, Root, Tag, TaskRecord, TaskUpdate, VcsError,
+    FetchLog, Policy, RepoKind, RepoRecord, Root, Tag, TaskRecord, TaskRepoRecord, TaskRepoUpdate,
+    TaskUpdate, VcsError,
 };
 
 const SCHEMA: &str = include_str!("../../../schema.sql");
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone)]
 pub struct Database {
@@ -28,6 +29,12 @@ impl Database {
             connection
                 .execute_batch(SCHEMA)
                 .map_err(|error| VcsError::Database(error.to_string()))?;
+            ensure_column(
+                connection,
+                "tasks",
+                "conflict_mode",
+                "TEXT NOT NULL DEFAULT 'policy'",
+            )?;
             let now = Utc::now().to_rfc3339();
             connection
                 .execute(
@@ -611,8 +618,8 @@ impl Database {
             connection
                 .execute(
                     "INSERT INTO tasks (id, type, status, request_id, operation_id, progress_current,
-                       progress_total, last_repo, last_result, error, result_json, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                        conflict_mode, progress_total, last_repo, last_result, error, result_json, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
                     params![
                         task.id,
                         task.task_type,
@@ -620,6 +627,7 @@ impl Database {
                         task.request_id,
                         task.operation_id,
                         task.progress_current.map(|value| value as i64),
+                        task.conflict_mode,
                         task.progress_total.map(|value| value as i64),
                         task.last_repo,
                         task.last_result,
@@ -633,12 +641,155 @@ impl Database {
         })
     }
 
+    pub fn create_task_repos(&self, task_id: &str, repo_ids: &[i64]) -> Result<(), VcsError> {
+        let now = Utc::now().to_rfc3339();
+        self.with_connection(|connection| {
+            for repo_id in repo_ids {
+                connection
+                    .execute(
+                        "INSERT OR IGNORE INTO task_repos
+                         (task_id, repo_id, status, created_at, updated_at)
+                         VALUES (?1, ?2, 'pending', ?3, ?3)",
+                        params![task_id, repo_id, now],
+                    )
+                    .map_err(|error| VcsError::Database(error.to_string()))?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn list_task_repos(&self, task_id: &str) -> Result<Vec<TaskRepoRecord>, VcsError> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, task_id, repo_id, status, conflict_reason, requested_action,
+                        result, duration_ms, backup_path, error, created_at, updated_at
+                     FROM task_repos WHERE task_id = ?1 ORDER BY id",
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            let rows = statement
+                .query_map(params![task_id], row_to_task_repo)
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            rows.map(|row| row.map_err(|error| VcsError::Database(error.to_string())))
+                .collect()
+        })
+    }
+
+    pub fn find_task_repo(
+        &self,
+        task_id: &str,
+        repo_id: i64,
+    ) -> Result<Option<TaskRepoRecord>, VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, task_id, repo_id, status, conflict_reason, requested_action,
+                        result, duration_ms, backup_path, error, created_at, updated_at
+                     FROM task_repos WHERE task_id = ?1 AND repo_id = ?2",
+                    params![task_id, repo_id],
+                    row_to_task_repo,
+                )
+                .optional()
+                .map_err(|error| VcsError::Database(error.to_string()))
+        })
+    }
+
+    pub fn claim_task_repo(
+        &self,
+        task_id: &str,
+        repo_id: i64,
+        from_status: &str,
+        to_status: &str,
+        requested_action: Option<&str>,
+    ) -> Result<bool, VcsError> {
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "UPDATE task_repos SET status = ?1, requested_action = ?2, updated_at = ?3
+                     WHERE task_id = ?4 AND repo_id = ?5 AND status = ?6",
+                    params![
+                        to_status,
+                        requested_action,
+                        Utc::now().to_rfc3339(),
+                        task_id,
+                        repo_id,
+                        from_status,
+                    ],
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            Ok(changed == 1)
+        })
+    }
+
+    pub fn update_task_repo(
+        &self,
+        task_id: &str,
+        repo_id: i64,
+        update: &TaskRepoUpdate,
+    ) -> Result<(), VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE task_repos SET status = ?1, conflict_reason = ?2,
+                        requested_action = ?3, result = ?4, duration_ms = ?5,
+                        backup_path = ?6, error = ?7, updated_at = ?8
+                     WHERE task_id = ?9 AND repo_id = ?10",
+                    params![
+                        update.status,
+                        update.conflict_reason,
+                        update.requested_action,
+                        update.result,
+                        update.duration_ms.map(|value| value as i64),
+                        update.backup_path,
+                        update.error,
+                        Utc::now().to_rfc3339(),
+                        task_id,
+                        repo_id,
+                    ],
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            Ok(())
+        })
+    }
+
+    pub fn has_active_task_type(&self, task_type: &str) -> Result<bool, VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM tasks
+                         WHERE type = ?1 AND status IN ('pending', 'running', 'waiting_for_decision')
+                     )",
+                    params![task_type],
+                    |row| row.get(0),
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))
+        })
+    }
+
+    pub fn mark_active_task_repos_interrupted(&self) -> Result<(), VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE task_repos SET status = 'interrupted',
+                        error = CASE WHEN status = 'resolving'
+                            THEN 'server restarted; manual reconciliation required'
+                            ELSE COALESCE(error, 'server restarted') END,
+                        updated_at = ?1
+                     WHERE status IN ('pending', 'running', 'resolving')",
+                    params![Utc::now().to_rfc3339()],
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            Ok(())
+        })
+    }
+
     pub fn find_task(&self, task_id: &str) -> Result<Option<TaskRecord>, VcsError> {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT id, type, status, request_id, operation_id, progress_current,
-                       progress_total, last_repo, last_result, error, result_json, created_at, updated_at
+                    "SELECT id, type, status, conflict_mode, request_id, operation_id, progress_current,
+                        progress_total, last_repo, last_result, error, result_json, created_at, updated_at
                      FROM tasks WHERE id = ?1",
                     params![task_id],
                     row_to_task,
@@ -722,6 +873,36 @@ impl Database {
     }
 }
 
+fn ensure_column(
+    connection: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), VcsError> {
+    let exists = {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|error| VcsError::Database(error.to_string()))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| VcsError::Database(error.to_string()))?;
+        columns
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| VcsError::Database(error.to_string()))?
+            .into_iter()
+            .any(|name| name == column)
+    };
+    if !exists {
+        connection
+            .execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(|error| VcsError::Database(error.to_string()))?;
+    }
+    Ok(())
+}
+
 fn parse_time(value: String) -> Result<DateTime<Utc>, rusqlite::Error> {
     DateTime::parse_from_rfc3339(&value)
         .map(|time| time.with_timezone(&Utc))
@@ -786,19 +967,39 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> Result<TaskRecord, rusqlite::Error> {
         id: row.get(0)?,
         task_type: row.get(1)?,
         status: row.get(2)?,
-        request_id: row.get(3)?,
-        operation_id: row.get(4)?,
+        conflict_mode: row.get(3)?,
+        request_id: row.get(4)?,
+        operation_id: row.get(5)?,
         progress_current: row
-            .get::<_, Option<i64>>(5)?
-            .map(|value| value.max(0) as u64),
-        progress_total: row
             .get::<_, Option<i64>>(6)?
             .map(|value| value.max(0) as u64),
-        last_repo: row.get(7)?,
-        last_result: row.get(8)?,
+        progress_total: row
+            .get::<_, Option<i64>>(7)?
+            .map(|value| value.max(0) as u64),
+        last_repo: row.get(8)?,
+        last_result: row.get(9)?,
+        error: row.get(10)?,
+        result_json: row.get(11)?,
+        created_at: parse_time(row.get(12)?)?,
+        updated_at: parse_time(row.get(13)?)?,
+    })
+}
+
+fn row_to_task_repo(row: &rusqlite::Row<'_>) -> Result<TaskRepoRecord, rusqlite::Error> {
+    Ok(TaskRepoRecord {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        repo_id: row.get(2)?,
+        status: row.get(3)?,
+        conflict_reason: row.get(4)?,
+        requested_action: row.get(5)?,
+        result: row.get(6)?,
+        duration_ms: row
+            .get::<_, Option<i64>>(7)?
+            .map(|value| value.max(0) as u64),
+        backup_path: row.get(8)?,
         error: row.get(9)?,
-        result_json: row.get(10)?,
-        created_at: parse_time(row.get(11)?)?,
-        updated_at: parse_time(row.get(12)?)?,
+        created_at: parse_time(row.get(10)?)?,
+        updated_at: parse_time(row.get(11)?)?,
     })
 }

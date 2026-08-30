@@ -76,14 +76,14 @@ pub fn pull_repo_with_reporter(
                     PullMode::Interactive => policy.conflict_action,
                     PullMode::Unattended => policy.unattended_action,
                 };
-                resolve_conflict(path, repo, action)
+                resolve_pull_conflict(path, repo, action)
             }
             Err(VcsError::GitCommand(message)) if is_conflict_message(&message) => {
                 let action = match mode {
                     PullMode::Interactive => policy.conflict_action,
                     PullMode::Unattended => policy.unattended_action,
                 };
-                resolve_conflict(path, repo, action)
+                resolve_pull_conflict(path, repo, action)
             }
             Err(error) => Err(error),
         }
@@ -151,7 +151,7 @@ pub fn make_fetch_log(repo_id: i64, strategy: &str, outcome: &PullOutcome) -> Fe
     }
 }
 
-fn resolve_conflict(
+pub fn resolve_pull_conflict(
     path: &Path,
     repo: &RepoRecord,
     action: PullConflictAction,

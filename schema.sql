@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     status TEXT NOT NULL,
+    conflict_mode TEXT NOT NULL DEFAULT 'policy',
     request_id TEXT,
     operation_id TEXT NOT NULL,
     progress_current INTEGER,
@@ -104,8 +105,25 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS task_repos (
+    id INTEGER PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    conflict_reason TEXT,
+    requested_action TEXT,
+    result TEXT,
+    duration_ms INTEGER,
+    backup_path TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_id, repo_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_repos_root ON repos(root_id);
 CREATE INDEX IF NOT EXISTS idx_repos_kind ON repos(repo_kind);
 CREATE INDEX IF NOT EXISTS idx_repos_status ON repos(clone_status, lock_violation);
 CREATE INDEX IF NOT EXISTS idx_fetch_log_repo ON fetch_log(repo_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_repos_task_status ON task_repos(task_id, status);

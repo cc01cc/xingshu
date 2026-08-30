@@ -43,6 +43,6 @@ pnpm run build
 - Real-process：编译后的 CLI/server 与 staging 数据。
 - Playwright MCP：真实 server/Vite、真实 API、桌面和移动 viewport。
 
-任务队列额外覆盖：`POST /api/v1/tasks` 返回 `202/taskId`，GET 返回持久化终态，SSE 返回 snapshot 和终态事件；独立 real-process 测试使用合成 tempdir 数据启动编译后的 server，验证 HTTP 与 SSE 全链路。WebUI 的 `task-store.ts` 覆盖 EventSource、GET 快照回退和指数退避重连。
+任务队列额外覆盖：`POST /api/v1/tasks` 返回 `202/taskId`，GET 返回持久化终态，SSE 返回 snapshot 和终态事件；任务级冲突覆盖 `waiting_for_decision`、conflicts 查询、backup/overwrite/abort 和重复决策 `409`。独立 real-process 测试使用合成 tempdir 数据启动编译后的 server，验证 HTTP 与 SSE 全链路。WebUI 的 `task-store.ts` 覆盖 EventSource、GET 快照/冲突回退和指数退避重连。
 
 所有写操作测试使用新的 `.staging/<run-id>` 或 tempdir。真实参考仓库不执行 pull、move、backup、overwrite。

@@ -36,7 +36,14 @@ const newRootPath = ref("");
 const loading = ref(true);
 const error = ref("");
 const taskStore = useTaskStore();
-const { task, connectionLabel, error: taskError, progressPercent, isBusy } = taskStore;
+const {
+  task,
+  taskConflicts,
+  connectionLabel,
+  error: taskError,
+  progressPercent,
+  isBusy,
+} = taskStore;
 const scanning = computed(() => isBusy.value && task.value?.type === "scan");
 const pulling = computed(() => isBusy.value && task.value?.type === "pull");
 const taskProgressLabel = computed(() => {
@@ -44,7 +51,7 @@ const taskProgressLabel = computed(() => {
   const total = task.value?.progressTotal;
   return total === null || total === undefined ? `已处理 ${current} 项` : `${current} / ${total}`;
 });
-const taskHasConflict = computed(() => task.value?.lastResult?.toLowerCase().includes("conflict") ?? false);
+const taskHasConflict = computed(() => taskConflicts.value.length > 0);
 
 const filteredRepos = computed(() => repos.value.filter((repo) => {
   const needle = query.value.trim().toLowerCase();
@@ -178,6 +185,18 @@ async function triggerTask(type: TaskType): Promise<void> {
   }
 }
 
+async function decideTaskConflict(
+  repoId: number,
+  action: "backup" | "overwrite" | "abort",
+): Promise<void> {
+  error.value = "";
+  try {
+    await taskStore.decide(repoId, action);
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "冲突决策失败";
+  }
+}
+
 function setView(nextView: "repos" | "tags" | "disks" | "settings"): void {
   view.value = nextView;
 }
@@ -216,6 +235,18 @@ watch(() => task.value?.status, (status, previous) => {
          <div class="task-meta"><span>{{ connectionLabel }}</span><span>{{ taskProgressLabel }}</span><span v-if="task.lastRepo" class="mono">{{ task.lastRepo }}</span></div>
          <div class="task-progress" :class="{ indeterminate: progressPercent === null }"><span :style="progressPercent === null ? undefined : { width: `${progressPercent}%` }" /></div>
          <p v-if="task.lastResult" class="task-result">{{ task.lastResult }}</p>
+         <div v-if="taskConflicts.length" class="task-conflicts">
+           <div class="task-conflicts-heading"><strong>待决策仓库</strong><span>{{ taskConflicts.length }} 项</span></div>
+           <article v-for="conflict in taskConflicts" :key="conflict.repoId" class="task-conflict">
+             <div><strong>{{ conflict.repoName }}</strong><small class="path">{{ conflict.repoPath }}</small></div>
+             <p>{{ conflict.conflictReason ?? 'Git 操作需要人工决策' }}</p>
+             <div class="task-conflict-actions">
+               <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'backup')">备份后拉取</button>
+               <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'overwrite')">覆盖本地</button>
+               <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'abort')">保持现状</button>
+             </div>
+           </article>
+         </div>
          <button v-if="taskHasConflict" class="task-link" @click="setView('repos')">查看冲突仓</button>
          <details v-if="task.resultJson" class="task-details"><summary>任务结果</summary><code>{{ task.resultJson }}</code></details>
          <p v-if="taskError || task.error" class="task-error">{{ taskError || task.error }}</p>

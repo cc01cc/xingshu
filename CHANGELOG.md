@@ -13,3 +13,4 @@ All notable changes to Xingshu are recorded here.
 - Enhanced stats with per-kind aggregation.
 - Added persisted asynchronous scan/batch-pull tasks, SSE progress streams, reconnect fallback, and WebUI task progress panels.
 - Added task API contract coverage, restart interruption checks, and a compiled-server HTTP/SSE integration test.
+- Added task-level conflict decisions with persisted per-repository state, conflict listing, explicit backup/overwrite/abort actions, and restart-safe resolution handling.

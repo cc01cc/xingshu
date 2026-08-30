@@ -14,6 +14,8 @@ fn openapi_contract_lists_runtime_routes_and_camel_case_fields() {
         "/api/v1/scan:",
         "/api/v1/tasks:",
         "/api/v1/tasks/{taskId}:",
+        "/api/v1/tasks/{taskId}/conflicts:",
+        "/api/v1/tasks/{taskId}/repos/{repoId}/decision:",
         "/api/v1/tasks/{taskId}/stream:",
         "/api/v1/stats:",
     ] {
@@ -29,6 +31,10 @@ fn openapi_contract_lists_runtime_routes_and_camel_case_fields() {
         "operationId",
         "progressCurrent",
         "lastRepo",
+        "conflictMode",
+        "repoStatus",
+        "durationMs",
+        "allowedActions",
     ] {
         assert!(contract.contains(field), "missing camelCase field {field}");
     }

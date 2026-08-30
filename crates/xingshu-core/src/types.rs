@@ -123,6 +123,7 @@ pub struct TaskRecord {
     pub id: String,
     pub task_type: String,
     pub status: String,
+    pub conflict_mode: String,
     pub request_id: Option<String>,
     pub operation_id: String,
     pub progress_current: Option<u64>,
@@ -140,6 +141,11 @@ pub struct TaskEvent {
     pub sequence: u64,
     pub event: String,
     pub task_id: String,
+    pub repo_id: Option<i64>,
+    pub repo_status: Option<String>,
+    pub conflict_reason: Option<String>,
+    pub requested_action: Option<String>,
+    pub backup_path: Option<String>,
     pub current: Option<u64>,
     pub total: Option<u64>,
     pub last_repo: Option<String>,
@@ -157,6 +163,33 @@ pub struct TaskUpdate {
     pub last_result: Option<String>,
     pub error: Option<String>,
     pub result_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRepoRecord {
+    pub id: i64,
+    pub task_id: String,
+    pub repo_id: i64,
+    pub status: String,
+    pub conflict_reason: Option<String>,
+    pub requested_action: Option<String>,
+    pub result: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub backup_path: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskRepoUpdate {
+    pub status: String,
+    pub conflict_reason: Option<String>,
+    pub requested_action: Option<String>,
+    pub result: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub backup_path: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

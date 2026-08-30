@@ -1,6 +1,6 @@
 # 数据库 Schema
 
-默认数据库为 `xingshu.db`，使用 SQLite WAL。所有表都包含 `created_at` 与 `updated_at`，由核心写操作维护。
+默认数据库为 `xingshu.db`，使用 SQLite WAL。当前 schema ledger 版本为 `4`。所有表都包含 `created_at` 与 `updated_at`，由核心写操作维护。
 
 ## 表
 
@@ -13,6 +13,7 @@
 | `policies` | repo 或 tag 级 pull/conflict policy |
 | `fetch_log` | 每次 pull 的业务审计记录 |
 | `tasks` | 异步 scan/pull 的持久化状态和最新进度 |
+| `task_repos` | 一个异步任务内每个仓库的状态、冲突决策和耗时 |
 
 ## 约束
 
@@ -22,6 +23,7 @@
 - `repo_kind=third-party`/`third-party-frozen` 默认 `modify_lock=1`。
 - remote URL 入库前必须剥离 userinfo，避免 token 进入数据库。
 - `tasks` 的 `pending`/`running` 任务在 server 启动时标记为 `interrupted`，终态任务保留供 GET 查询。
+- `task_repos` 的 `waiting_decision` 在重启后保留；`resolving` 会标记为 `interrupted`，不得自动重放 backup/overwrite。
 
 ## 迁移
 
