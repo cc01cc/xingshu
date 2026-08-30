@@ -1,0 +1,9 @@
+/target/
+/webui/node_modules/
+/webui/dist/
+/.staging/
+*.db
+*.db-shm
+*.db-wal
+*.bak.*
+*.broken.*
