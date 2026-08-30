@@ -1,0 +1,301 @@
+openapi: 3.1.0
+info:
+  title: Xingshu Local Project Index API
+  version: 0.1.0
+  description: Localhost API for the Xingshu project and Git repository index.
+servers:
+  - url: http://127.0.0.1:12681
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service health
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+  /api/v1/repos:
+    get:
+      operationId: listRepos
+      responses:
+        '200':
+          description: Indexed repositories with project tags
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Repo' }
+  /api/v1/repos/{repoId}/pull:
+    post:
+      operationId: pullRepo
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      responses:
+        '200': { $ref: '#/components/responses/PullResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/repos/{repoId}/pull/{action}:
+    post:
+      operationId: resolvePullConflict
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+        - name: action
+          in: path
+          required: true
+          schema: { type: string, enum: [backup, overwrite, abort] }
+      responses:
+        '200': { $ref: '#/components/responses/PullResult' }
+  /api/v1/repos/{repoId}/tags:
+    post:
+      operationId: attachTag
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TagReference' }
+      responses:
+        '204': { description: Tag attached }
+    delete:
+      operationId: detachTag
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TagReference' }
+      responses:
+        '204': { description: Tag detached }
+  /api/v1/roots:
+    get:
+      operationId: listRoots
+      responses:
+        '200':
+          description: Registered roots
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Root' }
+    post:
+      operationId: createRoot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRoot' }
+      responses:
+        '201': { description: Root created }
+        '400': { $ref: '#/components/responses/ProblemResponse' }
+  /api/v1/roots/{rootId}:
+    delete:
+      operationId: deleteRoot
+      parameters:
+        - { $ref: '#/components/parameters/RootId' }
+      responses:
+        '204': { description: Root deleted }
+        '404': { $ref: '#/components/responses/ProblemResponse' }
+  /api/v1/repos/{repoId}:
+    put:
+      operationId: updateRepoKind
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRepoKind' }
+      responses:
+        '204': { description: Kind updated }
+        '400': { $ref: '#/components/responses/ProblemResponse' }
+  /api/v1/tags:
+    get:
+      operationId: listTags
+      responses:
+        '200':
+          description: Project tags
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Tag' }
+    post:
+      operationId: createTag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTag' }
+      responses:
+        '201': { description: Tag created }
+  /api/v1/stats:
+    get:
+      operationId: getStats
+      responses:
+        '200':
+          description: Index statistics with kind breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [repositories, bytes, byKind]
+                properties:
+                  repositories: { type: integer, minimum: 0 }
+                  bytes: { type: integer, minimum: 0 }
+                  byKind: { type: object, additionalProperties: { type: integer, minimum: 0 } }
+  /api/v1/scan:
+    post:
+      operationId: triggerScan
+      responses:
+        '200':
+          description: Scan completed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanReport' }
+  /api/v1/tags/{tagId}:
+    delete:
+      operationId: deleteTag
+      parameters:
+        - { $ref: '#/components/parameters/TagId' }
+      responses:
+        '204': { description: Tag deleted }
+        '404': { $ref: '#/components/responses/ProblemResponse' }
+components:
+  parameters:
+    RepoId:
+      name: repoId
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    RootId:
+      name: rootId
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    TagId:
+      name: tagId
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+  schemas:
+    Repo:
+      type: object
+      required: [id, rootId, org, name, relPath, repoKind, cloneStatus, sizeBytes, tags]
+      properties:
+        id: { type: integer }
+        rootId: { type: integer }
+        org: { type: string }
+        name: { type: string }
+        relPath: { type: string }
+        remoteUrl: { type: [string, 'null'] }
+        defaultBranch: { type: [string, 'null'] }
+        headCommit: { type: [string, 'null'] }
+        repoKind: { type: string, enum: [third-party, third-party-frozen, fork, own] }
+        cloneStatus: { type: string }
+        sizeBytes: { type: integer, minimum: 0 }
+        modifyLock: { type: boolean }
+        lockViolation: { type: boolean }
+        tags: { type: array, items: { type: string } }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Root:
+      type: object
+      required: [id, name, path, priority]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        path: { type: string }
+        diskLabel: { type: [string, 'null'] }
+        mountPoint: { type: [string, 'null'] }
+        priority: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Tag:
+      type: object
+      required: [id, slug, label, kind]
+      properties:
+        id: { type: integer }
+        slug: { type: string }
+        label: { type: string }
+        color: { type: [string, 'null'] }
+        kind: { type: string, enum: [auto, manual] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateTag:
+      type: object
+      required: [slug]
+      properties:
+        slug: { type: string, minLength: 1 }
+        label: { type: string }
+        color: { type: string }
+    CreateRoot:
+      type: object
+      required: [path]
+      properties:
+        path: { type: string, description: Absolute path to root directory }
+        diskLabel: { type: [string, 'null'] }
+        mountPoint: { type: [string, 'null'] }
+        priority: { type: integer, default: 0 }
+    UpdateRepoKind:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [third-party, third-party-frozen, fork, own] }
+        upstreamRemote: { type: [string, 'null'], description: Remote name for fork upstream }
+    ScanReport:
+      type: object
+      required: [rootsScanned, reposFound, brokenRepos, skippedDirectories, nestedRepos, errors]
+      properties:
+        rootsScanned: { type: integer }
+        reposFound: { type: integer }
+        brokenRepos: { type: integer }
+        skippedDirectories: { type: integer }
+        nestedRepos: { type: integer }
+        errors: { type: array, items: { type: string } }
+    TagReference:
+      type: object
+      required: [slug]
+      properties:
+        slug: { type: string, minLength: 1 }
+    PullResult:
+      description: Pull operation result
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [result]
+            properties:
+              result: { type: string, enum: [ok, skipped, aborted] }
+              backupPath: { type: [string, 'null'] }
+    Problem:
+      type: object
+      required: [type, title, status, code, requestId, detail]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer }
+        code: { type: string }
+        requestId: { type: string }
+        detail: { type: string }
+  responses:
+    PullResult:
+      description: Pull operation result
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PullResult' }
+    Conflict:
+      description: A user decision is required
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ProblemResponse:
+      description: Problem details error response
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
