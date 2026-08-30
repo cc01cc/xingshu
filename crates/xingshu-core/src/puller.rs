@@ -6,6 +6,7 @@ use chrono::Utc;
 
 use crate::git::{self, GitCommandOutput};
 use crate::policy::{PullConflictAction, ResolvedPolicy, is_update_enabled};
+use crate::progress::ProgressReporter;
 use crate::types::{FetchLog, RepoRecord, VcsError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +28,16 @@ pub fn pull_repo(
     policy: &ResolvedPolicy,
     mode: PullMode,
 ) -> Result<PullOutcome, VcsError> {
+    pull_repo_with_reporter(path, repo, policy, mode, None)
+}
+
+pub fn pull_repo_with_reporter(
+    path: &Path,
+    repo: &RepoRecord,
+    policy: &ResolvedPolicy,
+    mode: PullMode,
+    reporter: Option<&dyn ProgressReporter>,
+) -> Result<PullOutcome, VcsError> {
     let started = Instant::now();
     tracing::debug!(
         path = %path.display(),
@@ -35,7 +46,10 @@ pub fn pull_repo(
         "pull requested"
     );
     let result = (|| {
-        if !is_update_enabled(&policy.pull_strategy) || repo.clone_status == "broken" {
+        if repo.is_bare
+            || !is_update_enabled(&policy.pull_strategy)
+            || repo.clone_status == "broken"
+        {
             return Ok(PullOutcome {
                 result: "skipped".to_owned(),
                 backup_path: None,
@@ -87,6 +101,14 @@ pub fn pull_repo(
             error = %error,
             "pull failed"
         ),
+    }
+    if let Some(reporter) = reporter {
+        match &result {
+            Ok(outcome) => reporter.item_finished(&path.to_string_lossy(), &outcome.result),
+            Err(error) => {
+                reporter.item_finished(&path.to_string_lossy(), &format!("error: {error}"))
+            }
+        }
     }
     result
 }

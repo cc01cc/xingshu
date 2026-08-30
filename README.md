@@ -6,7 +6,7 @@
 
 ## Current Status
 
-首版核心、CLI、API、基础 WebUI、结构化日志、分层测试和正式 Playwright MCP 验证已完成；后续功能演进见 PLAN-198。
+首版核心、CLI、API、基础 WebUI、异步任务实时进度、结构化日志、分层测试和正式 Playwright MCP 验证已完成；后续功能演进见 PLAN-198。
 
 ## Quick Start
 
@@ -29,6 +29,15 @@ $env:XINGSHU_PORT = "12681"
 - API/WebUI：<http://127.0.0.1:12681>
 - Health：<http://127.0.0.1:12681/health>
 - Vite dev：在 `webui/` 执行 `pnpm --ignore-workspace install` 后运行 `pnpm run dev`，端口 `12680`
+
+异步 scan/pull API：
+
+```powershell
+$task = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:12681/api/v1/tasks -ContentType "application/json" -Body '{"type":"scan"}'
+Invoke-RestMethod "http://127.0.0.1:12681/api/v1/tasks/$($task.taskId)"
+```
+
+实时进度通过 `GET /api/v1/tasks/{taskId}/stream` 的 SSE 返回；同步 `POST /api/v1/scan` 和单仓 pull 仍保留给脚本兼容。
 
 ## CLI
 

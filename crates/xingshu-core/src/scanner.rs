@@ -5,6 +5,7 @@ use chrono::Utc;
 
 use crate::db::Database;
 use crate::git::{self, GitMetadata};
+use crate::progress::ProgressReporter;
 use crate::types::{RepoKind, RepoRecord, Root, ScanOptions, VcsError};
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -22,7 +23,19 @@ pub fn scan_roots(
     roots: &[Root],
     options: &ScanOptions,
 ) -> Result<ScanReport, VcsError> {
+    scan_roots_with_reporter(database, roots, options, None)
+}
+
+pub fn scan_roots_with_reporter(
+    database: &Database,
+    roots: &[Root],
+    options: &ScanOptions,
+    reporter: Option<&dyn ProgressReporter>,
+) -> Result<ScanReport, VcsError> {
     let mut report = ScanReport::default();
+    if let Some(reporter) = reporter {
+        reporter.started(None);
+    }
     for root in roots {
         let Some(root_id) = root.id else {
             return Err(VcsError::Database(format!(
@@ -38,12 +51,17 @@ pub fn scan_roots(
             &root.path,
             0,
             options,
+            reporter,
             &mut report,
         )?;
+    }
+    if let Some(reporter) = reporter {
+        reporter.finished("completed");
     }
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_directory(
     database: &Database,
     root_id: i64,
@@ -51,6 +69,7 @@ fn scan_directory(
     current: &Path,
     depth: usize,
     options: &ScanOptions,
+    reporter: Option<&dyn ProgressReporter>,
     report: &mut ScanReport,
 ) -> Result<(), VcsError> {
     if is_generated_backup(current) {
@@ -83,6 +102,9 @@ fn scan_directory(
         };
         let repo_kind = classify(&git_metadata, options);
         let lock_violation = repo_kind.default_modify_lock() && git_metadata.dirty;
+        if clone_status == "broken" {
+            report.broken_repos += 1;
+        }
         let push_protect_remote = match &repo_kind {
             RepoKind::ThirdParty => Some("origin".to_owned()),
             RepoKind::Fork => Some("upstream".to_owned()),
@@ -120,6 +142,9 @@ fn scan_directory(
             "indexed repository"
         );
         report.repos_found += 1;
+        if let Some(reporter) = reporter {
+            reporter.item_finished(&relative.to_string_lossy(), &repo.clone_status);
+        }
         if lock_violation {
             report.errors.push(format!(
                 "{}: lock_violation (working tree contains local changes)",
@@ -130,17 +155,18 @@ fn scan_directory(
             return Ok(());
         }
         report.nested_repos += scan_children(
-            database, root_id, root_path, current, depth, options, report,
+            database, root_id, root_path, current, depth, options, reporter, report,
         )?;
         return Ok(());
     }
 
     scan_children(
-        database, root_id, root_path, current, depth, options, report,
+        database, root_id, root_path, current, depth, options, reporter, report,
     )?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_children(
     database: &Database,
     root_id: i64,
@@ -148,6 +174,7 @@ fn scan_children(
     current: &Path,
     depth: usize,
     options: &ScanOptions,
+    reporter: Option<&dyn ProgressReporter>,
     report: &mut ScanReport,
 ) -> Result<usize, VcsError> {
     if options.max_depth.is_some_and(|limit| depth >= limit) {
@@ -175,6 +202,7 @@ fn scan_children(
             &path,
             depth + 1,
             options,
+            reporter,
             report,
         )?;
         if report.repos_found > before {

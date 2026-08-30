@@ -26,6 +26,7 @@ uuid = { version = "1.23.3", features = ["v4"] }
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
+tokio-stream = { version = "0.1.18", features = ["sync"] }
 tower-http = { version = "0.6.11", features = ["fs"] }
 tower = { version = "0.5.3", features = ["util"] }
 walkdir = "2.5.0"

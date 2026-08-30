@@ -4,10 +4,12 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::types::{FetchLog, Policy, RepoKind, RepoRecord, Root, Tag, VcsError};
+use crate::types::{
+    FetchLog, Policy, RepoKind, RepoRecord, Root, Tag, TaskRecord, TaskUpdate, VcsError,
+};
 
 const SCHEMA: &str = include_str!("../../../schema.sql");
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone)]
 pub struct Database {
@@ -604,6 +606,85 @@ impl Database {
         })
     }
 
+    pub fn create_task(&self, task: &TaskRecord) -> Result<(), VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO tasks (id, type, status, request_id, operation_id, progress_current,
+                       progress_total, last_repo, last_result, error, result_json, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                    params![
+                        task.id,
+                        task.task_type,
+                        task.status,
+                        task.request_id,
+                        task.operation_id,
+                        task.progress_current.map(|value| value as i64),
+                        task.progress_total.map(|value| value as i64),
+                        task.last_repo,
+                        task.last_result,
+                        task.error,
+                        task.result_json,
+                        task.created_at.to_rfc3339(),
+                    ],
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            Ok(())
+        })
+    }
+
+    pub fn find_task(&self, task_id: &str) -> Result<Option<TaskRecord>, VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, type, status, request_id, operation_id, progress_current,
+                       progress_total, last_repo, last_result, error, result_json, created_at, updated_at
+                     FROM tasks WHERE id = ?1",
+                    params![task_id],
+                    row_to_task,
+                )
+                .optional()
+                .map_err(|error| VcsError::Database(error.to_string()))
+        })
+    }
+
+    pub fn update_task(&self, task_id: &str, update: &TaskUpdate) -> Result<(), VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE tasks SET status = ?1, progress_current = ?2, progress_total = ?3,
+                       last_repo = COALESCE(?4, last_repo), last_result = COALESCE(?5, last_result),
+                       error = ?6, result_json = COALESCE(?7, result_json), updated_at = ?8 WHERE id = ?9",
+                    params![
+                        update.status,
+                        update.current.map(|value| value as i64),
+                        update.total.map(|value| value as i64),
+                        update.last_repo,
+                        update.last_result,
+                        update.error,
+                        update.result_json,
+                        Utc::now().to_rfc3339(),
+                        task_id,
+                    ],
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            Ok(())
+        })
+    }
+
+    pub fn mark_active_tasks_interrupted(&self) -> Result<(), VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE tasks SET status = 'interrupted', error = 'server restarted', updated_at = ?1
+                     WHERE status IN ('pending', 'running')",
+                    params![Utc::now().to_rfc3339()],
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            Ok(())
+        })
+    }
+
     pub fn record_fetch_log(&self, log: &FetchLog) -> Result<i64, VcsError> {
         self.with_connection(|connection| {
             connection
@@ -697,5 +778,27 @@ fn row_to_policy(row: &rusqlite::Row<'_>) -> Result<Policy, rusqlite::Error> {
         unattended_conflict_policy: row.get(8)?,
         created_at: parse_time(row.get(9)?)?,
         updated_at: parse_time(row.get(10)?)?,
+    })
+}
+
+fn row_to_task(row: &rusqlite::Row<'_>) -> Result<TaskRecord, rusqlite::Error> {
+    Ok(TaskRecord {
+        id: row.get(0)?,
+        task_type: row.get(1)?,
+        status: row.get(2)?,
+        request_id: row.get(3)?,
+        operation_id: row.get(4)?,
+        progress_current: row
+            .get::<_, Option<i64>>(5)?
+            .map(|value| value.max(0) as u64),
+        progress_total: row
+            .get::<_, Option<i64>>(6)?
+            .map(|value| value.max(0) as u64),
+        last_repo: row.get(7)?,
+        last_result: row.get(8)?,
+        error: row.get(9)?,
+        result_json: row.get(10)?,
+        created_at: parse_time(row.get(11)?)?,
+        updated_at: parse_time(row.get(12)?)?,
     })
 }

@@ -119,6 +119,46 @@ pub struct FetchLog {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub id: String,
+    pub task_type: String,
+    pub status: String,
+    pub request_id: Option<String>,
+    pub operation_id: String,
+    pub progress_current: Option<u64>,
+    pub progress_total: Option<u64>,
+    pub last_repo: Option<String>,
+    pub last_result: Option<String>,
+    pub error: Option<String>,
+    pub result_json: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskEvent {
+    pub sequence: u64,
+    pub event: String,
+    pub task_id: String,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
+    pub last_repo: Option<String>,
+    pub last_result: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskUpdate {
+    pub status: String,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
+    pub last_repo: Option<String>,
+    pub last_result: Option<String>,
+    pub error: Option<String>,
+    pub result_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanOptions {
     pub max_depth: Option<usize>,
     pub skip_dirs: Vec<String>,

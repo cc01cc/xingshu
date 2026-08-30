@@ -1,6 +1,8 @@
 use std::io::Write;
 
+use chrono::Utc;
 use tempfile::TempDir;
+use xingshu_core::types::TaskRecord;
 use xingshu_core::{Database, logging};
 
 #[test]
@@ -25,7 +27,7 @@ fn schema_ledger_and_timestamp_columns_survive_database_reopen() {
             let version: i64 = connection
                 .query_row("SELECT MAX(version) FROM schema_meta", [], |row| row.get(0))
                 .map_err(|error| xingshu_core::types::VcsError::Database(error.to_string()))?;
-            assert_eq!(version, 1);
+            assert_eq!(version, 3);
             for table in [
                 "roots",
                 "repos",
@@ -33,6 +35,7 @@ fn schema_ledger_and_timestamp_columns_survive_database_reopen() {
                 "repo_tags",
                 "policies",
                 "fetch_log",
+                "tasks",
             ] {
                 let mut statement = connection
                     .prepare(&format!("PRAGMA table_info({table})"))
@@ -50,6 +53,48 @@ fn schema_ledger_and_timestamp_columns_survive_database_reopen() {
         .expect("inspect schema");
     drop(database);
     Database::open(&path).expect("reopen database");
+}
+
+#[test]
+fn active_tasks_are_marked_interrupted_without_touching_terminal_tasks() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join("index.db");
+    let database = Database::open(&path).expect("open database");
+    let now = Utc::now();
+    for (id, status) in [("active", "running"), ("finished", "completed")] {
+        database
+            .create_task(&TaskRecord {
+                id: id.to_owned(),
+                task_type: "scan".to_owned(),
+                status: status.to_owned(),
+                request_id: None,
+                operation_id: format!("operation-{id}"),
+                progress_current: Some(1),
+                progress_total: Some(2),
+                last_repo: None,
+                last_result: None,
+                error: None,
+                result_json: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .expect("create task");
+    }
+
+    database
+        .mark_active_tasks_interrupted()
+        .expect("mark active tasks");
+    let active = database
+        .find_task("active")
+        .expect("find active task")
+        .expect("active task");
+    let finished = database
+        .find_task("finished")
+        .expect("find finished task")
+        .expect("finished task");
+    assert_eq!(active.status, "interrupted");
+    assert_eq!(active.error.as_deref(), Some("server restarted"));
+    assert_eq!(finished.status, "completed");
 }
 
 #[test]

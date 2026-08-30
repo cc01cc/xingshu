@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { useTaskStore, type TaskType } from "./task-store";
 
 type Repo = {
   id: number;
@@ -33,8 +34,17 @@ const selected = ref<Repo | null>(null);
 const newTag = ref("");
 const newRootPath = ref("");
 const loading = ref(true);
-const scanning = ref(false);
 const error = ref("");
+const taskStore = useTaskStore();
+const { task, connectionLabel, error: taskError, progressPercent, isBusy } = taskStore;
+const scanning = computed(() => isBusy.value && task.value?.type === "scan");
+const pulling = computed(() => isBusy.value && task.value?.type === "pull");
+const taskProgressLabel = computed(() => {
+  const current = task.value?.progressCurrent ?? 0;
+  const total = task.value?.progressTotal;
+  return total === null || total === undefined ? `已处理 ${current} 项` : `${current} / ${total}`;
+});
+const taskHasConflict = computed(() => task.value?.lastResult?.toLowerCase().includes("conflict") ?? false);
 
 const filteredRepos = computed(() => repos.value.filter((repo) => {
   const needle = query.value.trim().toLowerCase();
@@ -152,14 +162,20 @@ async function deleteTag(id: number): Promise<void> {
 }
 
 async function triggerScan(): Promise<void> {
-  scanning.value = true;
+  await triggerTask("scan");
+}
+
+async function triggerPull(): Promise<void> {
+  await triggerTask("pull");
+}
+
+async function triggerTask(type: TaskType): Promise<void> {
   error.value = "";
   try {
-    await request("/api/v1/scan", { method: "POST" });
-    await load();
+    await taskStore.start(type);
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "扫描失败";
-  } finally { scanning.value = false; }
+    error.value = reason instanceof Error ? reason.message : `${type} 任务启动失败`;
+  }
 }
 
 function setView(nextView: "repos" | "tags" | "disks" | "settings"): void {
@@ -167,6 +183,12 @@ function setView(nextView: "repos" | "tags" | "disks" | "settings"): void {
 }
 
 onMounted(() => void load());
+
+watch(() => task.value?.status, (status, previous) => {
+  if (status && previous && status !== previous && ["completed", "failed", "interrupted"].includes(status)) {
+    void load();
+  }
+});
 </script>
 
 <template>
@@ -179,16 +201,26 @@ onMounted(() => void load());
         <a :class="{ active: view === 'disks' }" href="#" @click.prevent="setView('disks')">磁盘看板</a>
         <a :class="{ active: view === 'settings' }" href="#" @click.prevent="setView('settings')">设置</a>
         <a v-if="conflicts.length" class="attention" href="#" @click.prevent="setView('repos')">待决策 <span>{{ conflicts.length }}</span></a>
-        <button class="scan-btn" :disabled="scanning" @click="triggerScan">{{ scanning ? '扫描中…' : '扫描' }}</button>
+         <button class="scan-btn" :disabled="isBusy" @click="void triggerScan()">{{ scanning ? '扫描中…' : '扫描索引' }}</button>
+         <button class="scan-btn" :disabled="isBusy" @click="void triggerPull()">{{ pulling ? '批量 pull 中…' : '批量 pull' }}</button>
       </nav>
       <div class="sidebar-note">本地仓库索引<br /><small>localhost only</small></div>
     </aside>
     <main class="main">
       <header class="toolbar">
-        <div><p class="eyebrow">REPOSITORY INDEX</p><h1>{{ view === 'repos' ? '仓库目录' : view === 'tags' ? '主题标签' : '磁盘看板' }}</h1></div>
-        <input v-if="view === 'repos'" v-model="query" aria-label="搜索仓库" placeholder="搜索仓库、组织或路径…" />
-      </header>
-      <p v-if="error" class="notice error">{{ error }}</p>
+       <div><p class="eyebrow">REPOSITORY INDEX</p><h1>{{ view === 'repos' ? '仓库目录' : view === 'tags' ? '主题标签' : '磁盘看板' }}</h1></div>
+         <input v-if="view === 'repos'" v-model="query" aria-label="搜索仓库" placeholder="搜索仓库、组织或路径…" />
+       </header>
+       <section v-if="task" class="task-panel" aria-live="polite">
+         <div class="task-heading"><div><p class="eyebrow">ASYNC TASK</p><strong>{{ task.type === 'scan' ? '索引扫描' : '批量 pull' }}</strong><span class="task-status" :class="task.status">{{ task.status }}</span></div><button v-if="!isBusy" class="task-dismiss" @click="taskStore.dismiss">关闭</button></div>
+         <div class="task-meta"><span>{{ connectionLabel }}</span><span>{{ taskProgressLabel }}</span><span v-if="task.lastRepo" class="mono">{{ task.lastRepo }}</span></div>
+         <div class="task-progress" :class="{ indeterminate: progressPercent === null }"><span :style="progressPercent === null ? undefined : { width: `${progressPercent}%` }" /></div>
+         <p v-if="task.lastResult" class="task-result">{{ task.lastResult }}</p>
+         <button v-if="taskHasConflict" class="task-link" @click="setView('repos')">查看冲突仓</button>
+         <details v-if="task.resultJson" class="task-details"><summary>任务结果</summary><code>{{ task.resultJson }}</code></details>
+         <p v-if="taskError || task.error" class="task-error">{{ taskError || task.error }}</p>
+       </section>
+       <p v-if="error" class="notice error">{{ error }}</p>
       <div v-else-if="loading" class="empty">正在读取索引…</div>
       <template v-else-if="view === 'repos'">
         <section class="summary"><span><b>{{ filteredRepos.length }}</b> 个结果</span><select v-model="tagFilter" aria-label="按标签过滤"><option value="">全部标签</option><option v-for="tag in tags" :key="tag.id" :value="tag.slug">{{ tag.label }}</option></select><span class="legend"><i class="dot safe" />索引正常 <i class="dot warn" />需要处理</span></section>

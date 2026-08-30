@@ -1,7 +1,8 @@
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
@@ -11,25 +12,34 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::{HeaderValue, Request, StatusCode, header::CONTENT_TYPE},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::services::ServeDir;
+use xingshu_core::types::{RepoRecord, TaskEvent, TaskRecord};
 use xingshu_core::{
-    Database,
+    Database, ProgressReporter,
     policy::{PullConflictAction, default_for_kind},
-    puller::{PullMode, make_fetch_log, pull_repo},
+    puller::{PullMode, make_fetch_log, pull_repo, pull_repo_with_reporter},
 };
+
+mod tasks;
+use tasks::TaskManager;
 
 #[derive(Clone)]
 struct AppState {
     db_path: PathBuf,
     scan_lock: Arc<Mutex<()>>,
+    task_manager: TaskManager,
 }
 
 #[tokio::main]
@@ -43,6 +53,10 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(12681);
+    let database = Database::open(&db_path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    database
+        .mark_active_tasks_interrupted()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let app = build_router(db_path);
     let address: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -53,8 +67,9 @@ async fn main() -> Result<()> {
 
 fn build_router(db_path: PathBuf) -> Router {
     let state = AppState {
-        db_path,
+        db_path: db_path.clone(),
         scan_lock: Arc::new(Mutex::new(())),
+        task_manager: TaskManager::new(db_path),
     };
     Router::new()
         .route("/health", get(health))
@@ -71,6 +86,9 @@ fn build_router(db_path: PathBuf) -> Router {
         .route("/api/v1/tags", get(tags).post(create_tag))
         .route("/api/v1/tags/{tag_id}", delete(delete_tag))
         .route("/api/v1/scan", post(trigger_scan))
+        .route("/api/v1/tasks", post(create_task))
+        .route("/api/v1/tasks/{task_id}", get(get_task))
+        .route("/api/v1/tasks/{task_id}/stream", get(task_stream))
         .route("/api/v1/stats", get(stats))
         .fallback_service(ServeDir::new("webui/dist"))
         .layer(middleware::from_fn(request_id_middleware))
@@ -384,6 +402,246 @@ async fn pull_decision(
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateTaskRequest {
+    #[serde(rename = "type")]
+    task_type: String,
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<String>,
+    Json(request): Json<CreateTaskRequest>,
+) -> impl IntoResponse {
+    let task = match state
+        .task_manager
+        .create(&request.task_type, Some(request_id))
+    {
+        Ok(task) => task,
+        Err(error) if error.to_string().contains("already running") => {
+            return problem_response(StatusCode::CONFLICT, "task_busy", &error.to_string());
+        }
+        Err(error) if error.to_string().contains("unsupported task type") => {
+            return problem_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_task_type",
+                &error.to_string(),
+            );
+        }
+        Err(error) => return error_response(error.to_string()),
+    };
+    let task_id = task.id.clone();
+    let task_type = task.task_type.clone();
+    let manager = state.task_manager.clone();
+    let db_path = state.db_path.clone();
+    tokio::spawn(async move {
+        if let Err(error) = manager.start(&task_id) {
+            let _ = manager.finish(&task_id, "failed", None, Some(error.to_string()));
+            return;
+        }
+        let worker_manager = manager.clone();
+        let worker_id = task_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            run_task(&worker_manager, &worker_id, &task_type, &db_path)
+        })
+        .await;
+        match result {
+            Ok(Ok(value)) => {
+                let _ = manager.finish(&task_id, "completed", Some(value.to_string()), None);
+            }
+            Ok(Err(error)) => {
+                let _ = manager.finish(&task_id, "failed", None, Some(error.to_string()));
+            }
+            Err(error) => {
+                let _ = manager.finish(
+                    &task_id,
+                    "failed",
+                    None,
+                    Some(format!("task worker join failed: {error}")),
+                );
+            }
+        }
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "taskId": task.id,
+            "operationId": task.operation_id,
+            "status": task.status,
+        })),
+    )
+        .into_response()
+}
+
+async fn get_task(State(state): State<AppState>, Path(task_id): Path<String>) -> Response {
+    match state.task_manager.get(&task_id) {
+        Ok(Some(task)) => match task_to_api_value(task) {
+            Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+            Err(error) => error_response(format!("serialization failed: {error}")),
+        },
+        Ok(None) => problem_response(StatusCode::NOT_FOUND, "task_not_found", "task not found"),
+        Err(error) => error_response(error.to_string()),
+    }
+}
+
+async fn task_stream(State(state): State<AppState>, Path(task_id): Path<String>) -> Response {
+    let (task, receiver) = match state.task_manager.subscribe(&task_id) {
+        Ok(value) => value,
+        Err(error) if error.to_string().contains("task not found") => {
+            return problem_response(StatusCode::NOT_FOUND, "task_not_found", &error.to_string());
+        }
+        Err(error) => return error_response(error.to_string()),
+    };
+    let snapshot = match task_to_api_value(task) {
+        Ok(value) => value,
+        Err(error) => return error_response(format!("serialization failed: {error}")),
+    };
+    let initial = match Event::default().event("snapshot").json_data(snapshot) {
+        Ok(event) => event,
+        Err(error) => return error_response(format!("SSE serialization failed: {error}")),
+    };
+    let initial_stream = tokio_stream::once(Ok::<Event, Infallible>(initial));
+    let event_stream = BroadcastStream::new(receiver).filter_map(|event| match event {
+        Ok(event) => Some(Ok::<Event, Infallible>(task_event_to_sse(event))),
+        Err(_) => None,
+    });
+    let stream = initial_stream.chain(event_stream);
+    let mut response = Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("heartbeat"),
+        )
+        .into_response();
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-cache"));
+    response
+}
+
+fn task_to_api_value(task: TaskRecord) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = camelize_value(serde_json::to_value(task)?);
+    if let serde_json::Value::Object(fields) = &mut value {
+        if let Some(id) = fields.remove("id") {
+            fields.insert("taskId".to_owned(), id);
+        }
+        if let Some(task_type) = fields.remove("taskType") {
+            fields.insert("type".to_owned(), task_type);
+        }
+    }
+    Ok(value)
+}
+
+fn task_event_to_sse(event: TaskEvent) -> Event {
+    let data = match serde_json::to_value(&event) {
+        Ok(value) => camelize_value(value),
+        Err(_) => json!({ "taskId": event.task_id, "event": "failed" }),
+    };
+    match Event::default()
+        .id(event.sequence.to_string())
+        .event(event.event)
+        .json_data(data)
+    {
+        Ok(value) => value,
+        Err(_) => Event::default().event("failed").data("{}"),
+    }
+}
+
+fn run_task(
+    manager: &TaskManager,
+    task_id: &str,
+    task_type: &str,
+    db_path: &std::path::Path,
+) -> Result<serde_json::Value, xingshu_core::types::VcsError> {
+    let database = Database::open(db_path)?;
+    let reporter = manager.progress_reporter(task_id.to_owned());
+    match task_type {
+        "scan" => {
+            let roots = database.list_roots()?;
+            let report = xingshu_core::scanner::scan_roots_with_reporter(
+                &database,
+                &roots,
+                &xingshu_core::types::ScanOptions::default(),
+                Some(&reporter),
+            )?;
+            serde_json::to_value(report)
+                .map_err(|error| xingshu_core::types::VcsError::Database(error.to_string()))
+        }
+        "pull" => {
+            let roots = database.list_roots()?;
+            let repos = database.list_repos()?;
+            reporter.started(Some(repos.len() as u64));
+            let mut counts = std::collections::HashMap::<String, u64>::new();
+            for repo in repos {
+                let Some(root) = roots.iter().find(|root| root.id == Some(repo.root_id)) else {
+                    reporter.item_finished(&repo.name, "error: root not found");
+                    continue;
+                };
+                let policy = resolve_repo_policy(&database, &repo)?;
+                let path = root.path.join(&repo.rel_path);
+                match pull_repo_with_reporter(
+                    &path,
+                    &repo,
+                    &policy,
+                    PullMode::Unattended,
+                    Some(&reporter),
+                ) {
+                    Ok(outcome) => {
+                        let log = make_fetch_log(
+                            repo.id.unwrap_or_default(),
+                            &policy.pull_strategy,
+                            &outcome,
+                        );
+                        database.record_fetch_log(&log)?;
+                        database
+                            .update_pull_status(repo.id.unwrap_or_default(), &outcome.result)?;
+                        *counts.entry(outcome.result).or_default() += 1;
+                    }
+                    Err(error) => {
+                        *counts.entry("failed".to_owned()).or_default() += 1;
+                        tracing::error!(task_id = %task_id, repo_id = repo.id.unwrap_or_default(), error = %error, "task pull failed");
+                    }
+                }
+            }
+            reporter.finished("completed");
+            serde_json::to_value(counts)
+                .map_err(|error| xingshu_core::types::VcsError::Database(error.to_string()))
+        }
+        other => Err(xingshu_core::types::VcsError::Database(format!(
+            "unsupported task type: {other}"
+        ))),
+    }
+}
+
+fn resolve_repo_policy(
+    database: &Database,
+    repo: &RepoRecord,
+) -> Result<xingshu_core::policy::ResolvedPolicy, xingshu_core::types::VcsError> {
+    let stored = match database.repo_policy(repo.id.unwrap_or_default())? {
+        Some(policy) => Some(policy),
+        None => {
+            let mut tag_policy = None;
+            for tag_id in database.tag_ids_for_repo(repo.id.unwrap_or_default())? {
+                if let Some(policy) = database.tag_policy(tag_id)? {
+                    tag_policy = Some(policy);
+                    break;
+                }
+            }
+            tag_policy
+        }
+    };
+    match stored {
+        Some(policy) => Ok(xingshu_core::policy::ResolvedPolicy {
+            pull_strategy: policy.pull_strategy,
+            conflict_action: PullConflictAction::try_from(policy.pull_conflict_policy.as_str())?,
+            unattended_action: PullConflictAction::try_from(
+                policy.unattended_conflict_policy.as_str(),
+            )?,
+        }),
+        None => Ok(default_for_kind(&repo.repo_kind)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct UpdateRepoKindRequest {
     kind: String,
     #[serde(default)]
@@ -577,9 +835,11 @@ fn problem_response(status: StatusCode, code: &str, message: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use axum::{
         body::{Body, to_bytes},
-        http::Request,
+        http::{Request, StatusCode},
     };
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -662,5 +922,120 @@ mod tests {
                 .windows(b"secret".len())
                 .any(|window| window == b"secret")
         );
+    }
+
+    #[tokio::test]
+    async fn task_api_persists_completion_and_closes_terminal_sse() {
+        let temp = TempDir::new().expect("temp dir");
+        let database_path = temp.path().join("index.db");
+        Database::open(&database_path).expect("database");
+        let app = build_router(database_path.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"type":"scan"}"#))
+            .expect("create task request");
+        let response = app.clone().oneshot(request).await.expect("create task");
+        assert_eq!(response.status(), 202);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("task body");
+        let created: serde_json::Value = serde_json::from_slice(&body).expect("task json");
+        let task_id = created["taskId"].as_str().expect("task id").to_owned();
+
+        let task = loop {
+            let task = Database::open(&database_path)
+                .expect("open database")
+                .find_task(&task_id)
+                .expect("find task")
+                .expect("task");
+            if task.status == "completed" || task.status == "failed" {
+                break task;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(task.status, "completed");
+
+        let request = Request::builder()
+            .uri(format!("/api/v1/tasks/{task_id}"))
+            .body(Body::empty())
+            .expect("get task request");
+        let response = app.clone().oneshot(request).await.expect("get task");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("get task body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("get task json");
+        assert_eq!(value["taskId"], task_id);
+        assert_eq!(value["type"], "scan");
+        assert_eq!(value["status"], "completed");
+
+        let request = Request::builder()
+            .uri(format!("/api/v1/tasks/{task_id}/stream"))
+            .body(Body::empty())
+            .expect("stream request");
+        let response = app.oneshot(request).await.expect("stream");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .expect("content type")
+                .starts_with("text/event-stream")
+        );
+        assert_eq!(response.headers()["cache-control"], "no-cache");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("stream body");
+        let body = String::from_utf8(body.to_vec()).expect("SSE text");
+        assert!(body.contains("event: snapshot"));
+        assert!(body.contains("\"taskId\""));
+        assert!(body.contains("\"status\":\"completed\""));
+    }
+
+    #[tokio::test]
+    async fn task_api_returns_stable_problem_details_for_invalid_requests() {
+        let temp = TempDir::new().expect("temp dir");
+        let database_path = temp.path().join("index.db");
+        Database::open(&database_path).expect("database");
+        let app = build_router(database_path);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"type":"unknown"}"#))
+            .expect("invalid task request");
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("invalid task response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("invalid task body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("invalid task json");
+        assert_eq!(value["code"], "invalid_task_type");
+
+        for path in ["/api/v1/tasks/missing", "/api/v1/tasks/missing/stream"] {
+            let request = Request::builder()
+                .uri(path)
+                .body(Body::empty())
+                .expect("missing task request");
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("missing task response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/problem+json"
+            );
+        }
     }
 }

@@ -142,6 +142,29 @@ fn overwrite_removes_dirty_staging_files() {
 }
 
 #[test]
+fn bare_repository_is_skipped_by_batch_pull() {
+    let temp = TempDir::new().expect("temp");
+    let root = temp.path().join("root");
+    let repo_path = root.join("archives/demo.git");
+    fs::create_dir_all(repo_path.parent().expect("parent")).expect("parent");
+    let output = Command::new("git")
+        .args(["init", "--bare", "-q", repo_path.to_string_lossy().as_ref()])
+        .output()
+        .expect("bare repo");
+    assert!(output.status.success());
+    let database = Database::open(temp.path().join("index.db")).expect("db");
+    let repo = scanned_repo(&database, &root, &repo_path);
+    let outcome = pull_repo(
+        &repo_path,
+        &repo,
+        &policy(PullConflictAction::Abort),
+        PullMode::Unattended,
+    )
+    .expect("bare pull");
+    assert_eq!(outcome.result, "skipped");
+}
+
+#[test]
 fn non_conflict_git_failure_is_not_reported_as_user_conflict() {
     let temp = TempDir::new().expect("temp");
     let root = temp.path().join("root");

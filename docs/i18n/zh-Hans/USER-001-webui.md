@@ -10,5 +10,16 @@
 - 主题标签：创建领域标签并跳转到过滤后的仓库列表。
 - 磁盘看板：显示索引数量、空间和待决策数量。
 - 冲突决策：对 dirty 或冲突仓选择“备份后拉取”“覆盖本地”或“保持现状”。
+- 异步任务：侧栏的“扫描索引”和“批量 pull”创建后台任务，面板显示状态、进度、最后处理的仓库和连接状态。
+
+## 异步任务
+
+WebUI 使用任务 API，不等待长时间的同步请求：
+
+- `POST /api/v1/tasks`，请求体为 `{ "type": "scan" }` 或 `{ "type": "pull" }`，返回 `202` 和 `taskId`。
+- `GET /api/v1/tasks/{taskId}`，读取 SQLite 中保存的最新状态；状态包括 `pending`、`running`、`completed`、`failed` 和 `interrupted`。
+- `GET /api/v1/tasks/{taskId}/stream`，通过 SSE 先发送 `snapshot`，再发送 `started`、`progress`、`completed` 或 `failed` 事件。
+
+SSE 断开时页面先读取 GET 快照，再自动重连；断线不会直接被显示为任务失败。任务完成或失败后 SSE 关闭，但最终状态仍可通过 GET 查询。
 
 WebUI 的标签是星枢自有分类，不会创建或修改 Git tag。冲突决策只会作用于星枢当前操作指定的 staging/目标仓库。

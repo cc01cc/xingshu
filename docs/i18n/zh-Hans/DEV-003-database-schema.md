@@ -12,6 +12,7 @@
 | `repo_tags` | repo 与领域标签的多对多关系 |
 | `policies` | repo 或 tag 级 pull/conflict policy |
 | `fetch_log` | 每次 pull 的业务审计记录 |
+| `tasks` | 异步 scan/pull 的持久化状态和最新进度 |
 
 ## 约束
 
@@ -20,6 +21,7 @@
 - `POLICIES` 的 repo 级策略优先于 tag 级策略。
 - `repo_kind=third-party`/`third-party-frozen` 默认 `modify_lock=1`。
 - remote URL 入库前必须剥离 userinfo，避免 token 进入数据库。
+- `tasks` 的 `pending`/`running` 任务在 server 启动时标记为 `interrupted`，终态任务保留供 GET 查询。
 
 ## 迁移
 

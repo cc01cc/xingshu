@@ -158,6 +158,49 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ScanReport' }
+  /api/v1/tasks:
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTask' }
+      responses:
+        '202':
+          description: Task accepted for asynchronous execution
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskAccepted' }
+        '400': { $ref: '#/components/responses/ProblemResponse' }
+        '409': { $ref: '#/components/responses/TaskBusy' }
+  /api/v1/tasks/{taskId}:
+    get:
+      operationId: getTask
+      parameters:
+        - { $ref: '#/components/parameters/TaskId' }
+      responses:
+        '200':
+          description: Persisted task snapshot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/ProblemResponse' }
+  /api/v1/tasks/{taskId}/stream:
+    get:
+      operationId: streamTask
+      parameters:
+        - { $ref: '#/components/parameters/TaskId' }
+      responses:
+        '200':
+          description: Server-sent task snapshot and progress events
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-cache }
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/ProblemResponse' }
   /api/v1/tags/{tagId}:
     delete:
       operationId: deleteTag
@@ -183,6 +226,11 @@ components:
       in: path
       required: true
       schema: { type: integer, minimum: 1 }
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
   schemas:
     Repo:
       type: object
@@ -258,6 +306,35 @@ components:
         skippedDirectories: { type: integer }
         nestedRepos: { type: integer }
         errors: { type: array, items: { type: string } }
+    CreateTask:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [scan, pull] }
+    TaskAccepted:
+      type: object
+      required: [taskId, operationId, status]
+      properties:
+        taskId: { type: string }
+        operationId: { type: string }
+        status: { type: string, const: pending }
+    Task:
+      type: object
+      required: [taskId, type, status, requestId, operationId, progressCurrent, progressTotal, lastRepo, lastResult, error, resultJson, createdAt, updatedAt]
+      properties:
+        taskId: { type: string }
+        type: { type: string, enum: [scan, pull] }
+        status: { type: string, enum: [pending, running, completed, failed, interrupted] }
+        requestId: { type: [string, 'null'] }
+        operationId: { type: string }
+        progressCurrent: { type: [integer, 'null'], minimum: 0 }
+        progressTotal: { type: [integer, 'null'], minimum: 0 }
+        lastRepo: { type: [string, 'null'] }
+        lastResult: { type: [string, 'null'] }
+        error: { type: [string, 'null'] }
+        resultJson: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     TagReference:
       type: object
       required: [slug]
@@ -291,6 +368,11 @@ components:
           schema: { $ref: '#/components/schemas/PullResult' }
     Conflict:
       description: A user decision is required
+      content:
+        application/problem+json:
+           schema: { $ref: '#/components/schemas/Problem' }
+    TaskBusy:
+      description: A task of the same type is already running
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

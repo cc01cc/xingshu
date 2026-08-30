@@ -12,12 +12,26 @@ fn openapi_contract_lists_runtime_routes_and_camel_case_fields() {
         "/api/v1/tags:",
         "/api/v1/tags/{tagId}:",
         "/api/v1/scan:",
+        "/api/v1/tasks:",
+        "/api/v1/tasks/{taskId}:",
+        "/api/v1/tasks/{taskId}/stream:",
         "/api/v1/stats:",
     ] {
         assert!(contract.contains(route), "missing route {route}");
     }
-    for field in ["requestId", "repoId", "repoKind", "sizeBytes", "createdAt"] {
+    for field in [
+        "requestId",
+        "repoId",
+        "repoKind",
+        "sizeBytes",
+        "createdAt",
+        "taskId",
+        "operationId",
+        "progressCurrent",
+        "lastRepo",
+    ] {
         assert!(contract.contains(field), "missing camelCase field {field}");
     }
     assert!(contract.contains("application/problem+json"));
+    assert!(contract.contains("text/event-stream"));
 }
