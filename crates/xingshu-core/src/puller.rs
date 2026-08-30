@@ -103,11 +103,16 @@ pub fn pull_repo_with_reporter(
         ),
     }
     if let Some(reporter) = reporter {
+        let elapsed = started.elapsed().as_millis() as u64;
         match &result {
-            Ok(outcome) => reporter.item_finished(&path.to_string_lossy(), &outcome.result),
-            Err(error) => {
-                reporter.item_finished(&path.to_string_lossy(), &format!("error: {error}"))
+            Ok(outcome) => {
+                reporter.item_finished(&path.to_string_lossy(), &outcome.result, Some(elapsed))
             }
+            Err(error) => reporter.item_finished(
+                &path.to_string_lossy(),
+                &format!("error: {error}"),
+                Some(elapsed),
+            ),
         }
     }
     result

@@ -28,6 +28,7 @@ type TaskEvent = {
   lastRepo?: string | null;
   lastResult?: string | null;
   error?: string | null;
+  durationMs?: number | null;
 };
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "interrupted"]);
@@ -76,6 +77,7 @@ function parseEvent(value: unknown): TaskEvent | null {
     lastRepo: asNullableString(value.lastRepo),
     lastResult: asNullableString(value.lastResult),
     error: asNullableString(value.error),
+    durationMs: asNullableNumber(value.durationMs),
   };
 }
 

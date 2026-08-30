@@ -198,7 +198,19 @@ impl TaskManager {
         last_repo: Option<&str>,
         last_result: Option<&str>,
     ) {
-        let _ = self.update(
+        self.report_progress_with_duration(task_id, current, total, last_repo, last_result, None);
+    }
+
+    fn report_progress_with_duration(
+        &self,
+        task_id: &str,
+        current: Option<u64>,
+        total: Option<u64>,
+        last_repo: Option<&str>,
+        last_result: Option<&str>,
+        duration_ms: Option<u64>,
+    ) {
+        let _ = self.update_with_duration(
             task_id,
             "progress",
             TaskUpdate {
@@ -210,10 +222,21 @@ impl TaskManager {
                 error: None,
                 result_json: None,
             },
+            duration_ms,
         );
     }
 
     fn update(&self, task_id: &str, event_name: &str, change: TaskUpdate) -> Result<(), VcsError> {
+        self.update_with_duration(task_id, event_name, change, None)
+    }
+
+    fn update_with_duration(
+        &self,
+        task_id: &str,
+        event_name: &str,
+        change: TaskUpdate,
+        duration_ms: Option<u64>,
+    ) -> Result<(), VcsError> {
         Database::open(&self.db_path)?.update_task(task_id, &change)?;
         let mut runtimes = self
             .runtimes
@@ -232,6 +255,7 @@ impl TaskManager {
             last_repo: change.last_repo,
             last_result: change.last_result,
             error: change.error,
+            duration_ms,
         };
         let _ = runtime.sender.send(event);
         Ok(())
@@ -255,15 +279,16 @@ impl ProgressReporter for TaskReporter {
             .report_progress(&self.task_id, Some(0), total, None, Some("started"));
     }
 
-    fn item_finished(&self, item: &str, result: &str) {
+    fn item_finished(&self, item: &str, result: &str, duration_ms: Option<u64>) {
         let current = self.current.fetch_add(1, Ordering::Relaxed) + 1;
         let total = self.total.lock().ok().and_then(|value| *value);
-        self.manager.report_progress(
+        self.manager.report_progress_with_duration(
             &self.task_id,
             Some(current),
             total,
             Some(item),
             Some(result),
+            duration_ms,
         );
     }
 

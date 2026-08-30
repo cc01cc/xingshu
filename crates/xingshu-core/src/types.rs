@@ -145,6 +145,7 @@ pub struct TaskEvent {
     pub last_repo: Option<String>,
     pub last_result: Option<String>,
     pub error: Option<String>,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

@@ -143,7 +143,7 @@ fn scan_directory(
         );
         report.repos_found += 1;
         if let Some(reporter) = reporter {
-            reporter.item_finished(&relative.to_string_lossy(), &repo.clone_status);
+            reporter.item_finished(&relative.to_string_lossy(), &repo.clone_status, None);
         }
         if lock_violation {
             report.errors.push(format!(

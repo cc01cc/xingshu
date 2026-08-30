@@ -569,42 +569,65 @@ fn run_task(
         "pull" => {
             let roots = database.list_roots()?;
             let repos = database.list_repos()?;
-            reporter.started(Some(repos.len() as u64));
+            let total = repos.len() as u64;
+            reporter.started(Some(total));
             let mut counts = std::collections::HashMap::<String, u64>::new();
-            for repo in repos {
-                let Some(root) = roots.iter().find(|root| root.id == Some(repo.root_id)) else {
-                    reporter.item_finished(&repo.name, "error: root not found");
-                    continue;
-                };
-                let policy = resolve_repo_policy(&database, &repo)?;
-                let path = root.path.join(&repo.rel_path);
-                match pull_repo_with_reporter(
-                    &path,
-                    &repo,
-                    &policy,
-                    PullMode::Unattended,
-                    Some(&reporter),
-                ) {
-                    Ok(outcome) => {
-                        let log = make_fetch_log(
-                            repo.id.unwrap_or_default(),
-                            &policy.pull_strategy,
-                            &outcome,
-                        );
-                        database.record_fetch_log(&log)?;
-                        database
-                            .update_pull_status(repo.id.unwrap_or_default(), &outcome.result)?;
-                        *counts.entry(outcome.result).or_default() += 1;
+            let mut repo_results: Vec<serde_json::Value> = Vec::new();
+            let mut current = 0u64;
+            let concurrency = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8);
+            for chunk in repos.chunks(concurrency) {
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = chunk
+                        .iter()
+                        .map(|repo| {
+                            let roots = roots.clone();
+                            let database = database.clone();
+                            scope.spawn(move || {
+                                (|| -> Result<(String, String, Option<u64>), xingshu_core::types::VcsError> {
+                                    let root = roots.iter().find(|r| r.id == Some(repo.root_id))
+                                        .ok_or_else(|| xingshu_core::types::VcsError::Database("root not found".to_owned()))?;
+                                    let policy = resolve_repo_policy(&database, repo)?;
+                                    let path = root.path.join(&repo.rel_path);
+                                    let started = std::time::Instant::now();
+                                    let result = match pull_repo_with_reporter(&path, repo, &policy, PullMode::Unattended, None) {
+                                        Ok(outcome) => {
+                                            let log = make_fetch_log(repo.id.unwrap_or_default(), &policy.pull_strategy, &outcome);
+                                            database.record_fetch_log(&log)?;
+                                            database.update_pull_status(repo.id.unwrap_or_default(), &outcome.result)?;
+                                            outcome.result
+                                        }
+                                        Err(error) => format!("error: {error}"),
+                                    };
+                                    let duration_ms = started.elapsed().as_millis() as u64;
+                                    Ok((repo.name.clone(), result, Some(duration_ms)))
+                                })()
+                                .unwrap_or_else(|e| (repo.name.clone(), format!("error: {e}"), None))
+                            })
+                        })
+                        .collect();
+                    for handle in handles {
+                        if let Ok((name, result, duration)) = handle.join() {
+                            current += 1;
+                            reporter.item_finished(&name, &result, duration);
+                            *counts.entry(result.clone()).or_default() += 1;
+                            repo_results.push(serde_json::json!({
+                                "repo": name,
+                                "result": result,
+                                "durationMs": duration,
+                            }));
+                        }
                     }
-                    Err(error) => {
-                        *counts.entry("failed".to_owned()).or_default() += 1;
-                        tracing::error!(task_id = %task_id, repo_id = repo.id.unwrap_or_default(), error = %error, "task pull failed");
-                    }
-                }
+                });
             }
             reporter.finished("completed");
-            serde_json::to_value(counts)
-                .map_err(|error| xingshu_core::types::VcsError::Database(error.to_string()))
+            serde_json::to_value(serde_json::json!({
+                "counts": counts,
+                "repos": repo_results,
+            }))
+            .map_err(|error| xingshu_core::types::VcsError::Database(error.to_string()))
         }
         other => Err(xingshu_core::types::VcsError::Database(format!(
             "unsupported task type: {other}"

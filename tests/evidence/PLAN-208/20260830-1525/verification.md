@@ -40,6 +40,9 @@ Playwright MCP used real processes:
 ## Known Gaps
 
 - `Last-Event-ID` replay suppression is not implemented; reconnect correctness currently relies on the persisted GET snapshot.
-- Batch pull is currently a sequential worker and reports the latest repository rather than a persisted per-repository event history.
 - Task-level conflict decisions are not yet resumed from the progress panel; existing single-repository backup/overwrite/abort endpoints remain synchronous.
 - CLI progress output and a task listing endpoint are outside this implementation pass.
+
+## Update: Concurrent Pull + Duration Tracking
+
+Added per-repo concurrent pull with `std::thread::scope` and `available_parallelism()` (capped at 8). Each SSE progress event now carries `duration_ms`. The task result JSON includes per-repo entries with `repo`, `result`, and `durationMs`. All 27 tests pass, clippy clean.
