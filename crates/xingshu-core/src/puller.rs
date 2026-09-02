@@ -202,8 +202,20 @@ pub fn resolve_pull_conflict(
 }
 
 fn backup_path(path: &Path) -> PathBuf {
-    let timestamp = Utc::now().format("%Y%m%d%H%M%S");
-    PathBuf::from(format!("{}.bak.{}", path.display(), timestamp))
+    let timestamp = Utc::now().format("%Y%m%d%H%M%S%.3f");
+    let base = format!("{}.bak.{}", path.display(), timestamp);
+    let mut candidate = PathBuf::from(&base);
+    let mut counter = 1u32;
+    while candidate.exists() {
+        candidate = PathBuf::from(format!("{base}_{counter}"));
+        counter += 1;
+        if counter > 100 {
+            let fallback = Utc::now().format("%Y%m%d%H%M%S%.6f");
+            candidate = PathBuf::from(format!("{}.bak.{}", path.display(), fallback));
+            break;
+        }
+    }
+    candidate
 }
 
 fn clone_into(remote: &str, path: &Path) -> Result<(), VcsError> {

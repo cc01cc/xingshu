@@ -345,6 +345,9 @@ async fn pull(State(state): State<AppState>, Path(repo_id): Path<i64>) -> impl I
         let log = make_fetch_log(repo_id, &policy.pull_strategy, &outcome);
         db.record_fetch_log(&log)?;
         db.update_pull_status(repo_id, &outcome.result)?;
+        if outcome.result == "ok" {
+            let _ = db.set_lock_violation(repo_id, false);
+        }
         Ok::<_, anyhow::Error>(outcome)
     })();
     match result {
@@ -399,6 +402,9 @@ async fn pull_decision(
         let log = make_fetch_log(repo_id, &policy.pull_strategy, &outcome);
         db.record_fetch_log(&log)?;
         db.update_pull_status(repo_id, &outcome.result)?;
+        if outcome.result == "ok" {
+            let _ = db.set_lock_violation(repo_id, false);
+        }
         Ok::<_, anyhow::Error>(outcome)
     })();
     match result {
@@ -716,6 +722,9 @@ fn resolve_task_repo_decision(
             let log = make_fetch_log(repo_id, &policy.pull_strategy, &outcome);
             database.record_fetch_log(&log)?;
             database.update_pull_status(repo_id, &outcome.result)?;
+            if outcome.result == "ok" {
+                let _ = database.set_lock_violation(repo_id, false);
+            }
             let update = TaskRepoUpdate {
                 status: status.to_owned(),
                 conflict_reason: task_repo.conflict_reason,
