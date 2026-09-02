@@ -46,12 +46,97 @@ const {
 } = taskStore;
 const scanning = computed(() => isBusy.value && task.value?.type === "scan");
 const pulling = computed(() => isBusy.value && task.value?.type === "pull");
+const resolvingAction = ref<"backup" | "overwrite" | "abort" | null>(null);
 const taskProgressLabel = computed(() => {
   const current = task.value?.progressCurrent ?? 0;
   const total = task.value?.progressTotal;
   return total === null || total === undefined ? `已处理 ${current} 项` : `${current} / ${total}`;
 });
 const taskHasConflict = computed(() => taskConflicts.value.length > 0);
+
+const parsedTaskResult = computed<Record<string, unknown> | null>(() => {
+  const raw = task.value?.resultJson;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+});
+const prettyTaskJson = computed(() => {
+  const parsed = parsedTaskResult.value;
+  if (!parsed) return task.value?.resultJson ?? "";
+  try {
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return task.value?.resultJson ?? "";
+  }
+});
+const taskCounts = computed(() => {
+  const parsed = parsedTaskResult.value;
+  if (!parsed || typeof parsed.counts !== "object" || parsed.counts === null || Array.isArray(parsed.counts)) return null;
+  return parsed.counts as Record<string, number>;
+});
+const taskRepos = computed(() => {
+  const parsed = parsedTaskResult.value;
+  if (!parsed || !Array.isArray((parsed as Record<string, unknown>).repos)) return null;
+  return (parsed as Record<string, unknown>).repos as Array<Record<string, unknown>>;
+});
+const taskScanStats = computed(() => {
+  const parsed = parsedTaskResult.value;
+  if (!parsed) return null;
+  if ("repos_found" in parsed || "roots_scanned" in parsed || "reposFound" in parsed) return parsed as Record<string, unknown>;
+  return null;
+});
+
+function labelResult(value: unknown): string {
+  const key = String(value ?? "");
+  const map: Record<string, string> = { ok: "成功", aborted: "已中止", skipped: "已跳过", failed: "失败", conflict: "冲突需决策", waiting_decision: "等待决策", resolving: "处理中", completed: "已完成", interrupted: "已中断" };
+  return map[key] ?? key;
+}
+function labelStatus(value: unknown): string {
+  const key = String(value ?? "");
+  const map: Record<string, string> = { pending: "等待中", running: "运行中", completed: "已完成", failed: "失败", aborted: "已中止", waiting_decision: "等待决策", resolving: "处理中", interrupted: "已中断", ok: "成功", skipped: "已跳过", conflict: "冲突" };
+  return map[key] ?? key;
+}
+function formatDuration(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  if (n < 1000) return `${n}ms`;
+  if (n < 60000) return `${(n / 1000).toFixed(1)}s`;
+  return `${(n / 60000).toFixed(1)}min`;
+}
+function shortBackupPath(value: unknown): string {
+  if (!value) return "—";
+  const str = String(value);
+  const parts = str.split(/[\\/]/);
+  return parts[parts.length - 1] || str;
+}
+function friendlyError(message: string): string {
+  if (message === "Failed to fetch" || message.includes("Failed to fetch")) {
+    return "无法连接本地服务 (Failed to fetch)，请确认 xingshu-server 运行于 12681";
+  }
+  if (message.startsWith("HTTP 409")) return "任务冲突：已有同类任务正在运行";
+  if (message.startsWith("HTTP 404")) return "未找到资源 (404)，请刷新后重试";
+  return message;
+}
+function badgeClassForResult(value: unknown): string {
+  const key = String(value ?? "");
+  if (key === "failed" || key === "interrupted" || key === "error") return "error";
+  if (key === "aborted" || key === "conflict" || key === "waiting_decision" || key === "resolving") return "warning";
+  if (key === "ok" || key === "completed" || key === "success") return "success";
+  return "";
+}
+const taskTotal = computed(() => {
+  if (!taskCounts.value) return null;
+  return Object.values(taskCounts.value).reduce((sum, n) => sum + (Number(n) || 0), 0);
+});
+const taskSummaryText = computed(() => {
+  if (!taskCounts.value || taskTotal.value === null) return "";
+  const entries = Object.entries(taskCounts.value).map(([k, v]) => `${labelResult(k)} ${v}`);
+  return `共 ${taskTotal.value} 个仓库：${entries.join("、")}`;
+});
 
 const filteredRepos = computed(() => repos.value.filter((repo) => {
   const needle = query.value.trim().toLowerCase();
@@ -83,7 +168,8 @@ async function load(): Promise<void> {
     roots.value = await rootResponse.json() as Root[];
     error.value = "";
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "无法加载索引";
+    const message = reason instanceof Error ? reason.message : "无法加载索引";
+    error.value = friendlyError(message);
   } finally { loading.value = false; }
 }
 
@@ -98,16 +184,32 @@ async function pull(repo: Repo): Promise<void> {
     const response = await request(`/api/v1/repos/${repo.id}/pull`, { method: "POST" });
     if (response.status === 409) selected.value = repo;
     await load();
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : "pull 失败"; }
+  } catch (reason) { error.value = friendlyError(reason instanceof Error ? reason.message : "pull 失败"); }
 }
 
 async function resolveConflict(action: "backup" | "overwrite" | "abort"): Promise<void> {
-  if (!selected.value) return;
+  if (!selected.value || resolvingAction.value) return;
+  resolvingAction.value = action;
+  error.value = "";
   try {
-    await request(`/api/v1/repos/${selected.value.id}/pull/${action}`, { method: "POST" });
+    const response = await request(`/api/v1/repos/${selected.value.id}/pull/${action}`, { method: "POST" });
+    // request throws only for non-2xx non-409; parse body for detail if needed
+    try {
+      const body: unknown = await response.clone().json();
+      if (body && typeof body === "object" && "backupPath" in (body as Record<string, unknown>)) {
+        const bp = (body as Record<string, unknown>).backupPath;
+        if (bp) console.info("backup created", bp);
+      }
+    } catch { /* ignore json parse */ }
     selected.value = null;
     await load();
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : "冲突处理失败"; }
+  } catch (reason) {
+    const message = reason instanceof Error ? reason.message : "冲突处理失败";
+    // improve problem-details visibility: fetch already maps detail
+    error.value = friendlyError(message);
+  } finally {
+    resolvingAction.value = null;
+  }
 }
 
 async function createTag(): Promise<void> {
@@ -142,14 +244,14 @@ async function addRoot(): Promise<void> {
     await request("/api/v1/roots", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) });
     newRootPath.value = "";
     await load();
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : "添加根目录失败"; }
+  } catch (reason) { error.value = friendlyError(reason instanceof Error ? reason.message : "添加根目录失败"); }
 }
 
 async function removeRoot(id: number): Promise<void> {
   try {
     await request(`/api/v1/roots/${id}`, { method: "DELETE" });
     await load();
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : "删除根目录失败"; }
+  } catch (reason) { error.value = friendlyError(reason instanceof Error ? reason.message : "删除根目录失败"); }
 }
 
 async function updateKind(kind: string): Promise<void> {
@@ -158,14 +260,14 @@ async function updateKind(kind: string): Promise<void> {
     await request(`/api/v1/repos/${selected.value.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind }) });
     await load();
     selected.value = repos.value.find((item) => item.id === selected.value?.id) ?? null;
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : "更新类型失败"; }
+  } catch (reason) { error.value = friendlyError(reason instanceof Error ? reason.message : "更新类型失败"); }
 }
 
 async function deleteTag(id: number): Promise<void> {
   try {
     await request(`/api/v1/tags/${id}`, { method: "DELETE" });
     await load();
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : "删除标签失败"; }
+  } catch (reason) { error.value = friendlyError(reason instanceof Error ? reason.message : "删除标签失败"); }
 }
 
 async function triggerScan(): Promise<void> {
@@ -181,7 +283,7 @@ async function triggerTask(type: TaskType): Promise<void> {
   try {
     await taskStore.start(type);
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : `${type} 任务启动失败`;
+    error.value = friendlyError(reason instanceof Error ? reason.message : `${type} 任务启动失败`);
   }
 }
 
@@ -193,7 +295,7 @@ async function decideTaskConflict(
   try {
     await taskStore.decide(repoId, action);
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "冲突决策失败";
+    error.value = friendlyError(reason instanceof Error ? reason.message : "冲突决策失败");
   }
 }
 
@@ -227,35 +329,71 @@ watch(() => task.value?.status, (status, previous) => {
     </aside>
     <main class="main">
       <header class="toolbar">
-       <div><p class="eyebrow">REPOSITORY INDEX</p><h1>{{ view === 'repos' ? '仓库目录' : view === 'tags' ? '主题标签' : '磁盘看板' }}</h1></div>
+       <div><p class="eyebrow">REPOSITORY INDEX</p><h1>{{ view === 'repos' ? '仓库目录' : view === 'tags' ? '主题标签' : view === 'disks' ? '磁盘看板' : '设置' }}</h1></div>
          <input v-if="view === 'repos'" v-model="query" aria-label="搜索仓库" placeholder="搜索仓库、组织或路径…" />
        </header>
-       <section v-if="task" class="task-panel" aria-live="polite">
-         <div class="task-heading"><div><p class="eyebrow">ASYNC TASK</p><strong>{{ task.type === 'scan' ? '索引扫描' : '批量 pull' }}</strong><span class="task-status" :class="task.status">{{ task.status }}</span></div><button v-if="!isBusy" class="task-dismiss" @click="taskStore.dismiss">关闭</button></div>
-         <div class="task-meta"><span>{{ connectionLabel }}</span><span>{{ taskProgressLabel }}</span><span v-if="task.lastRepo" class="mono">{{ task.lastRepo }}</span></div>
-         <div class="task-progress" :class="{ indeterminate: progressPercent === null }"><span :style="progressPercent === null ? undefined : { width: `${progressPercent}%` }" /></div>
-         <p v-if="task.lastResult" class="task-result">{{ task.lastResult }}</p>
-         <div v-if="taskConflicts.length" class="task-conflicts">
-           <div class="task-conflicts-heading"><strong>待决策仓库</strong><span>{{ taskConflicts.length }} 项</span></div>
-           <article v-for="conflict in taskConflicts" :key="conflict.repoId" class="task-conflict">
-             <div><strong>{{ conflict.repoName }}</strong><small class="path">{{ conflict.repoPath }}</small></div>
-             <p>{{ conflict.conflictReason ?? 'Git 操作需要人工决策' }}</p>
-             <div class="task-conflict-actions">
-               <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'backup')">备份后拉取</button>
-               <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'overwrite')">覆盖本地</button>
-               <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'abort')">保持现状</button>
-             </div>
-           </article>
-         </div>
-         <button v-if="taskHasConflict" class="task-link" @click="setView('repos')">查看冲突仓</button>
-         <details v-if="task.resultJson" class="task-details"><summary>任务结果</summary><code>{{ task.resultJson }}</code></details>
-         <p v-if="taskError || task.error" class="task-error">{{ taskError || task.error }}</p>
+        <section v-if="task" class="task-panel" aria-live="polite">
+          <div class="task-heading"><div><p class="eyebrow">ASYNC TASK</p><strong>{{ task.type === 'scan' ? '索引扫描' : '批量 pull' }}</strong><span class="task-status" :class="task.status">{{ labelStatus(task.status) }}</span></div><button v-if="!isBusy" class="task-dismiss" @click="taskStore.dismiss">关闭</button></div>
+          <div class="task-meta"><span>{{ connectionLabel }}</span><span>{{ taskProgressLabel }}</span><span v-if="task.lastRepo" class="mono" :title="task.lastRepo">{{ task.lastRepo }}</span></div>
+          <div class="task-progress" :class="{ indeterminate: isBusy && progressPercent === null }"><span :style="progressPercent === null ? (task?.status === 'completed' ? { width: '100%' } : isBusy ? undefined : { width: '100%', opacity: '0.5' }) : { width: `${progressPercent}%` }" /></div>
+          <p v-if="task.lastResult" class="task-result">{{ labelStatus(task.lastResult) }}</p>
+          <div v-if="taskConflicts.length" class="task-conflicts">
+            <div class="task-conflicts-heading"><strong>待决策仓库</strong><span>{{ taskConflicts.length }} 项</span></div>
+            <article v-for="conflict in taskConflicts" :key="conflict.repoId" class="task-conflict">
+              <div><strong>{{ conflict.repoName }}</strong><small class="path">{{ conflict.repoPath }}</small><small v-if="conflict.backupPath" class="path" :title="String(conflict.backupPath)">备份: {{ shortBackupPath(conflict.backupPath) }}</small></div>
+              <p>{{ conflict.conflictReason ?? 'Git 操作需要人工决策' }}</p>
+              <p class="mono" style="color:#6d7671;font-size:10px">耗时 {{ formatDuration(conflict.durationMs) }} · 状态 {{ labelStatus(conflict.status) }}<span v-if="conflict.requestedAction" style="margin-left:6px">· 已请求: {{ labelResult(conflict.requestedAction) }}</span></p>
+              <div class="task-conflict-actions">
+                <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'backup')">备份后拉取</button>
+                <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'overwrite')">覆盖本地</button>
+                <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'abort')">保持现状</button>
+              </div>
+            </article>
+          </div>
+          <button v-if="taskHasConflict" class="task-link" @click="setView('repos')">查看冲突仓</button>
+          <details v-if="task.resultJson" class="task-details" open><summary>任务结果</summary>
+            <div v-if="parsedTaskResult" class="task-result-rendered">
+              <p v-if="taskSummaryText" class="task-summary">{{ taskSummaryText }}</p>
+              <div v-if="taskCounts" class="task-counts">
+                <span v-for="(count, key) in taskCounts" :key="String(key)" class="count-badge" :class="'count-' + String(key)" :title="String(key)">{{ labelResult(key) }} {{ count }}</span>
+              </div>
+              <div v-if="taskRepos && taskRepos.length" class="task-repos-wrap">
+                <table class="task-repos-table">
+                  <thead><tr><th>仓库</th><th>状态</th><th>结果</th><th>耗时</th><th>备份</th><th>错误</th></tr></thead>
+                  <tbody>
+                    <tr v-for="repo in taskRepos" :key="String((repo as Record<string, unknown>).repoId ?? (repo as Record<string, unknown>).repo ?? Math.random())">
+                      <td class="mono" :title="String((repo as Record<string, unknown>).repo ?? (repo as Record<string, unknown>).repoId ?? '')">{{ String((repo as Record<string, unknown>).repo ?? (repo as Record<string, unknown>).repoId ?? '—') }}</td>
+                      <td>{{ labelStatus((repo as Record<string, unknown>).status) }}</td>
+                      <td><span class="status" :class="badgeClassForResult((repo as Record<string, unknown>).result)">{{ labelResult((repo as Record<string, unknown>).result) }}</span></td>
+                      <td class="mono">{{ formatDuration((repo as Record<string, unknown>).durationMs) }}</td>
+                      <td class="mono" :title="String((repo as Record<string, unknown>).backupPath ?? '')">{{ shortBackupPath((repo as Record<string, unknown>).backupPath) }}</td>
+                      <td class="mono error-cell" :title="String((repo as Record<string, unknown>).error ?? '')">{{ (repo as Record<string, unknown>).error ? String((repo as Record<string, unknown>).error).slice(0, 80) : '—' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else-if="taskScanStats" class="task-scan-stats">
+                <span>已扫描 {{ String((taskScanStats as Record<string, unknown>).roots_scanned ?? (taskScanStats as Record<string, unknown>).rootsScanned ?? '—') }} 根</span>
+                <span>发现 {{ String((taskScanStats as Record<string, unknown>).repos_found ?? (taskScanStats as Record<string, unknown>).reposFound ?? '—') }} 仓</span>
+                <span v-if="(taskScanStats as Record<string, unknown>).broken_repos || (taskScanStats as Record<string, unknown>).brokenRepos">异常 {{ String((taskScanStats as Record<string, unknown>).broken_repos ?? (taskScanStats as Record<string, unknown>).brokenRepos) }}</span>
+                <span v-if="(taskScanStats as Record<string, unknown>).skipped_directories || (taskScanStats as Record<string, unknown>).skippedDirectories">跳过 {{ String((taskScanStats as Record<string, unknown>).skipped_directories ?? (taskScanStats as Record<string, unknown>).skippedDirectories) }}</span>
+                <span v-if="(taskScanStats as Record<string, unknown>).nested_repos || (taskScanStats as Record<string, unknown>).nestedRepos">嵌套 {{ String((taskScanStats as Record<string, unknown>).nested_repos ?? (taskScanStats as Record<string, unknown>).nestedRepos) }}</span>
+              </div>
+              <details class="task-raw"><summary>原始 JSON（调试）</summary><pre class="task-json">{{ prettyTaskJson }}</pre></details>
+            </div>
+            <code v-else class="task-raw-fallback">{{ task.resultJson }}</code>
+          </details>
+          <p v-if="taskError || task.error" class="task-error">{{ taskError || task.error }}</p>
        </section>
        <p v-if="error" class="notice error">{{ error }}</p>
       <div v-else-if="loading" class="empty">正在读取索引…</div>
       <template v-else-if="view === 'repos'">
         <section class="summary"><span><b>{{ filteredRepos.length }}</b> 个结果</span><select v-model="tagFilter" aria-label="按标签过滤"><option value="">全部标签</option><option v-for="tag in tags" :key="tag.id" :value="tag.slug">{{ tag.label }}</option></select><span class="legend"><i class="dot safe" />索引正常 <i class="dot warn" />需要处理</span></section>
-        <div v-if="filteredRepos.length === 0" class="empty">没有匹配的仓库</div>
+        <div v-if="filteredRepos.length === 0" class="empty">
+          <template v-if="!repos.length && roots.length">暂无仓库索引 · 请到 <a href="#" @click.prevent="setView('settings')">设置</a> 点击「扫描索引」</template>
+          <template v-else-if="!repos.length && !roots.length">暂无根目录 · 请到 <a href="#" @click.prevent="setView('settings')">设置</a> 添加根目录后扫描</template>
+          <template v-else>没有匹配的仓库</template>
+        </div>
         <div v-else class="table-wrap"><table><thead><tr><th>仓库</th><th>类型</th><th>标签</th><th>大小</th><th>状态</th><th /></tr></thead><tbody><tr v-for="repo in filteredRepos" :key="repo.id" @click="selected = repo">
           <td><strong>{{ repo.org }}/{{ repo.name }}</strong><small>{{ repo.relPath }}</small></td><td><span class="kind" :class="repo.repoKind">{{ repo.repoKind }}</span></td><td><span v-for="slug in repo.tags" :key="slug" class="tag">{{ slug }}</span><span v-if="!repo.tags.length" class="muted">未分类</span></td><td class="mono">{{ formatBytes(repo.sizeBytes) }}</td><td><span v-if="repo.lockViolation" class="status warning">本地改动</span><span v-else class="status">{{ repo.lastPullStatus ?? "未更新" }}</span></td><td><button class="more" @click.stop="selected = repo">···</button></td>
         </tr></tbody></table></div>
@@ -267,12 +405,18 @@ watch(() => task.value?.status, (status, previous) => {
       </template>
       <template v-else-if="view === 'settings'">
         <h2 class="settings-title">根目录管理</h2>
+        <p class="settings-hint">添加本地 Git 仓库的父目录（可多个、跨盘），添加后需手动触发扫描才会生成索引。</p>
         <form class="root-create" @submit.prevent="addRoot"><input v-model="newRootPath" aria-label="根目录路径" placeholder="输入根目录绝对路径…" /><button type="submit">添加</button></form>
-        <div class="root-list"><div v-for="root in roots" :key="root.id" class="root-item"><div><strong>{{ root.name }}</strong><small>{{ root.path }}</small><span v-if="root.diskLabel" class="tag">{{ root.diskLabel }}</span></div><button @click="removeRoot(root.id)">移除</button></div><div v-if="!roots.length" class="empty">暂无根目录</div></div>
+        <div class="root-list"><div v-for="root in roots" :key="root.id" class="root-item"><div><strong>{{ root.name }}</strong><small>{{ root.path }}</small><span v-if="root.diskLabel" class="tag">{{ root.diskLabel }}</span></div><button @click="removeRoot(root.id)">移除</button></div><div v-if="!roots.length" class="empty">暂无根目录 · 示例：S:\zeogit-ref</div></div>
+        <div class="settings-actions">
+          <button class="settings-scan-btn" :disabled="isBusy || !roots.length" @click="void triggerScan()">{{ scanning ? '扫描中…' : `扫描索引（${roots.length} 个根目录）` }}</button>
+          <span class="muted">{{ roots.length ? (repos.length ? `已索引 ${repos.length} 个仓库` : '尚未扫描，点击扫描后仓库将出现在「仓库」页') : '先添加根目录' }}</span>
+        </div>
+        <p v-if="roots.length && !repos.length && !task" class="notice">提示：根目录已就绪，请点击上方「扫描索引」执行首次索引。Z:\TEST 这类空目录不会产生仓库。</p>
         <h2 class="settings-title">关于</h2>
         <dl class="about"><dt>版本</dt><dd>0.1.0</dd><dt>API 端口</dt><dd>12681</dd><dt>WebUI 端口</dt><dd>12680</dd></dl>
       </template>
     </main>
-    <aside v-if="selected" class="drawer"><button class="close" aria-label="关闭详情" @click="selected = null">×</button><p class="eyebrow">REPOSITORY DETAIL</p><h2>{{ selected.org }}/{{ selected.name }}</h2><small class="path">{{ selected.relPath }}</small><dl><dt>类型</dt><dd><select class="kind-select" :value="selected.repoKind" @change="updateKind(($event.target as HTMLSelectElement).value)"><option value="third-party">third-party</option><option value="third-party-frozen">third-party-frozen</option><option value="fork">fork</option><option value="own">own</option></select><span v-if="selected.modifyLock" class="muted"> · 星枢修改锁</span></dd><dt>分支</dt><dd>{{ selected.defaultBranch ?? 'bare / unknown' }}</dd><dt>HEAD</dt><dd class="mono">{{ selected.headCommit?.slice(0, 10) ?? '—' }}</dd><dt>远程</dt><dd class="path">{{ selected.remoteUrl ?? '—' }}</dd><dt>大小</dt><dd>{{ formatBytes(selected.sizeBytes) }}</dd><dt>标签</dt><dd><span v-for="slug in selected.tags" :key="slug" class="tag">{{ slug }}</span><span v-if="!selected.tags.length" class="muted">无</span></dd></dl><div class="drawer-actions"><button @click="void pull(selected)">pull</button><select aria-label="添加标签" @change="selectTag($event, selected)"><option value="">添加标签…</option><option v-for="tag in tags" :key="tag.id" :value="tag.slug">{{ tag.label }}</option></select></div><div v-if="selected.lockViolation" class="conflict"><b>检测到本地改动</b><p>当前仓库被标记为锁定类型。选择处理方式：</p><button @click="void resolveConflict('backup')">备份后拉取</button><button @click="void resolveConflict('overwrite')">覆盖本地</button><button @click="void resolveConflict('abort')">保持现状</button></div></aside>
+    <aside v-if="selected" class="drawer"><button class="close" aria-label="关闭详情" @click="selected = null">×</button><p class="eyebrow">REPOSITORY DETAIL</p><h2>{{ selected.org }}/{{ selected.name }}</h2><small class="path">{{ selected.relPath }}</small><dl><dt>类型</dt><dd><select class="kind-select" :value="selected.repoKind" @change="updateKind(($event.target as HTMLSelectElement).value)"><option value="third-party">third-party</option><option value="third-party-frozen">third-party-frozen</option><option value="fork">fork</option><option value="own">own</option></select><span v-if="selected.modifyLock" class="muted"> · 星枢修改锁</span></dd><dt>分支</dt><dd>{{ selected.defaultBranch ?? 'bare / unknown' }}</dd><dt>HEAD</dt><dd class="mono">{{ selected.headCommit?.slice(0, 10) ?? '—' }}</dd><dt>远程</dt><dd class="path">{{ selected.remoteUrl ?? '—' }}</dd><dt>大小</dt><dd>{{ formatBytes(selected.sizeBytes) }}</dd><dt>标签</dt><dd><span v-for="slug in selected.tags" :key="slug" class="tag">{{ slug }}</span><span v-if="!selected.tags.length" class="muted">无</span></dd></dl><div class="drawer-actions"><button @click="void pull(selected)">pull</button><select aria-label="添加标签" @change="selectTag($event, selected)"><option value="">添加标签…</option><option v-for="tag in tags" :key="tag.id" :value="tag.slug">{{ tag.label }}</option></select></div><div v-if="selected.lockViolation" class="conflict"><b>检测到本地改动</b><p>当前仓库被标记为锁定类型。选择处理方式：</p><button :disabled="!!resolvingAction" @click="void resolveConflict('backup')">{{ resolvingAction==='backup' ? '处理中…' : '备份后拉取' }}</button><button :disabled="!!resolvingAction" @click="void resolveConflict('overwrite')">{{ resolvingAction==='overwrite' ? '处理中…' : '覆盖本地' }}</button><button :disabled="!!resolvingAction" @click="void resolveConflict('abort')">{{ resolvingAction==='abort' ? '处理中…' : '保持现状' }}</button><p v-if="resolvingAction" class="muted" style="margin-top:8px">正在执行 {{ labelResult(resolvingAction) }}，大仓库可能耗时数秒…</p></div></aside>
   </div>
 </template>

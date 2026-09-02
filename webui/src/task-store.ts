@@ -150,15 +150,23 @@ function parseConflict(value: unknown): TaskConflict | null {
   };
 }
 
+function friendlyFetchMessage(message: string): string {
+  if (message === "Failed to fetch" || message.includes("Failed to fetch")) {
+    return "无法连接本地服务 (Failed to fetch)，请确认 xingshu-server 运行于 12681";
+  }
+  return message;
+}
+
 async function responseError(response: Response): Promise<Error> {
   try {
     const body: unknown = await response.json();
-    if (isRecord(body) && typeof body.detail === "string") return new Error(body.detail);
-    if (isRecord(body) && typeof body.message === "string") return new Error(body.message);
+    if (isRecord(body) && typeof body.detail === "string") return new Error(friendlyFetchMessage(body.detail));
+    if (isRecord(body) && typeof body.message === "string") return new Error(friendlyFetchMessage(body.message));
   } catch {
     // Fall through to the status when a proxy returns a non-JSON error page.
   }
-  return new Error(`HTTP ${response.status}`);
+  const raw = `HTTP ${response.status}`;
+  return new Error(friendlyFetchMessage(raw));
 }
 
 export function useTaskStore() {
@@ -169,6 +177,10 @@ export function useTaskStore() {
   const progressPercent = computed(() => {
     const current = task.value?.progressCurrent;
     const total = task.value?.progressTotal;
+    const status = task.value?.status;
+    if (status === "completed") {
+      if (total === null || total === undefined || total <= 0) return 100;
+    }
     if (current === null || current === undefined || total === null || total === undefined || total <= 0) return null;
     return Math.min(100, Math.max(0, (current / total) * 100));
   });
@@ -207,7 +219,12 @@ export function useTaskStore() {
   }
 
   async function getTask(taskId: string): Promise<Task> {
-    const response = await fetch(`/api/v1/tasks/${encodeURIComponent(taskId)}`);
+    let response: Response;
+    try {
+      response = await fetch(`/api/v1/tasks/${encodeURIComponent(taskId)}`);
+    } catch (reason) {
+      throw new Error(friendlyFetchMessage(reason instanceof Error ? reason.message : String(reason)));
+    }
     if (!response.ok) throw await responseError(response);
     const parsed = parseTask(await response.json() as unknown);
     if (!parsed) throw new Error("任务响应格式无效");
@@ -215,7 +232,12 @@ export function useTaskStore() {
   }
 
   async function loadConflicts(taskId: string): Promise<void> {
-    const response = await fetch(`/api/v1/tasks/${encodeURIComponent(taskId)}/conflicts`);
+    let response: Response;
+    try {
+      response = await fetch(`/api/v1/tasks/${encodeURIComponent(taskId)}/conflicts`);
+    } catch (reason) {
+      throw new Error(friendlyFetchMessage(reason instanceof Error ? reason.message : String(reason)));
+    }
     if (!response.ok) throw await responseError(response);
     const value: unknown = await response.json();
     if (!Array.isArray(value)) throw new Error("冲突响应格式无效");
@@ -224,7 +246,12 @@ export function useTaskStore() {
   }
 
   async function refresh(taskId: string): Promise<Task> {
-    const next = await getTask(taskId);
+    let next: Task;
+    try {
+      next = await getTask(taskId);
+    } catch (reason) {
+      throw new Error(friendlyFetchMessage(reason instanceof Error ? reason.message : String(reason)));
+    }
     if (activeTaskId !== taskId) return next;
     task.value = next;
     if (next.type === "pull") {
@@ -363,11 +390,16 @@ export function useTaskStore() {
     taskConflicts.value = [];
     activeTaskId = null;
     error.value = "";
-    const response = await fetch("/api/v1/tasks", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, ...(type === "pull" ? { conflictMode: "ask" } : {}) }),
-    });
+    let response: Response;
+    try {
+      response = await fetch("/api/v1/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, ...(type === "pull" ? { conflictMode: "ask" } : {}) }),
+      });
+    } catch (reason) {
+      throw new Error(friendlyFetchMessage(reason instanceof Error ? reason.message : String(reason)));
+    }
     if (!response.ok) throw await responseError(response);
     const created: unknown = await response.json();
     if (!isRecord(created) || typeof created.taskId !== "string") throw new Error("任务创建响应格式无效");
@@ -401,14 +433,19 @@ export function useTaskStore() {
     action: "backup" | "overwrite" | "abort",
   ): Promise<void> {
     if (!activeTaskId) return;
-    const response = await fetch(
-      `/api/v1/tasks/${encodeURIComponent(activeTaskId)}/repos/${repoId}/decision`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      },
-    );
+    let response: Response;
+    try {
+      response = await fetch(
+        `/api/v1/tasks/${encodeURIComponent(activeTaskId)}/repos/${repoId}/decision`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        },
+      );
+    } catch (reason) {
+      throw new Error(friendlyFetchMessage(reason instanceof Error ? reason.message : String(reason)));
+    }
     if (!response.ok) throw await responseError(response);
     await loadConflicts(activeTaskId);
   }
