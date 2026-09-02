@@ -149,6 +149,86 @@ paths:
                   repositories: { type: integer, minimum: 0 }
                   bytes: { type: integer, minimum: 0 }
                   byKind: { type: object, additionalProperties: { type: integer, minimum: 0 } }
+  /api/v1/repos/{repoId}/fetch_log:
+    get:
+      operationId: listFetchLogs
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      responses:
+        '200':
+          description: Fetch history for a repository
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/FetchLog' }
+  /api/v1/repos/{repoId}/move:
+    post:
+      operationId: moveRepo
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetRootId]
+              properties:
+                targetRootId: { type: integer }
+      responses:
+        '200':
+          description: Repository moved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path: { type: string }
+  /api/v1/repos/{repoId}/policy:
+    get:
+      operationId: getRepoPolicy
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      responses:
+        '200':
+          description: Repository pull policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Policy' }
+    put:
+      operationId: setRepoPolicy
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PolicyRequest' }
+      responses:
+        '204': { description: Policy updated }
+  /api/v1/tags/{tagId}/policy:
+    get:
+      operationId: getTagPolicy
+      parameters:
+        - { $ref: '#/components/parameters/TagId' }
+      responses:
+        '200':
+          description: Tag pull policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Policy' }
+    put:
+      operationId: setTagPolicy
+      parameters:
+        - { $ref: '#/components/parameters/TagId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PolicyRequest' }
+      responses:
+        '204': { description: Policy updated }
   /api/v1/scan:
     post:
       operationId: triggerScan
@@ -330,6 +410,37 @@ components:
       properties:
         kind: { type: string, enum: [third-party, third-party-frozen, fork, own] }
         upstreamRemote: { type: [string, 'null'], description: Remote name for fork upstream }
+    FetchLog:
+      type: object
+      properties:
+        id: { type: [integer, 'null'] }
+        repoId: { type: integer }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+        strategy: { type: string }
+        result: { type: string }
+        objects: { type: [integer, 'null'] }
+        bytes: { type: [integer, 'null'] }
+        error: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Policy:
+      type: object
+      properties:
+        id: { type: [integer, 'null'] }
+        repoId: { type: [integer, 'null'] }
+        tagId: { type: [integer, 'null'] }
+        pullStrategy: { type: string }
+        pullConflictPolicy: { type: string }
+        unattendedConflictPolicy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    PolicyRequest:
+      type: object
+      properties:
+        pullStrategy: { type: string }
+        conflict: { type: string }
+        unattended: { type: string }
     ScanReport:
       type: object
       required: [rootsScanned, reposFound, brokenRepos, skippedDirectories, nestedRepos, errors]

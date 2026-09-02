@@ -860,6 +860,34 @@ impl Database {
         })
     }
 
+    pub fn list_fetch_logs(&self, repo_id: i64, limit: i64) -> Result<Vec<FetchLog>, VcsError> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, repo_id, started_at, finished_at, strategy, result, objects, bytes, error, created_at, updated_at FROM fetch_log WHERE repo_id = ?1 ORDER BY started_at DESC LIMIT ?2",
+                )
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            let rows = statement
+                .query_map(params![repo_id, limit], |row| {
+                    Ok(FetchLog {
+                        id: row.get(0)?,
+                        repo_id: row.get(1)?,
+                        started_at: parse_time(row.get::<_, String>(2)?)?,
+                        finished_at: parse_optional_time(row.get::<_, Option<String>>(3)?)?,
+                        strategy: row.get(4)?,
+                        result: row.get(5)?,
+                        objects: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+                        bytes: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+                        error: row.get(8)?,
+                        created_at: parse_time(row.get::<_, String>(9)?)?,
+                        updated_at: parse_time(row.get::<_, String>(10)?)?,
+                    })
+                })
+                .map_err(|error| VcsError::Database(error.to_string()))?;
+            rows.map(|row| row.map_err(|error| VcsError::Database(error.to_string()))).collect()
+        })
+    }
+
     pub fn update_pull_status(&self, repo_id: i64, status: &str) -> Result<(), VcsError> {
         self.with_connection(|connection| {
             connection

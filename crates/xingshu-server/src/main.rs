@@ -100,6 +100,16 @@ fn build_router(db_path: PathBuf) -> Router {
         .route("/api/v1/tasks/{task_id}", get(get_task))
         .route("/api/v1/tasks/{task_id}/stream", get(task_stream))
         .route("/api/v1/stats", get(stats))
+        .route("/api/v1/repos/{repo_id}/fetch_log", get(fetch_logs))
+        .route("/api/v1/repos/{repo_id}/move", post(move_repo_handler))
+        .route(
+            "/api/v1/repos/{repo_id}/policy",
+            get(get_repo_policy).put(set_repo_policy),
+        )
+        .route(
+            "/api/v1/tags/{tag_id}/policy",
+            get(get_tag_policy).put(set_tag_policy),
+        )
         .fallback_service(ServeDir::new("webui/dist"))
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(state)
@@ -1177,6 +1187,205 @@ async fn stats(State(state): State<AppState>) -> impl IntoResponse {
             )
                 .into_response()
         }
+        Err(error) => error_response(error.to_string()),
+    }
+}
+
+async fn fetch_logs(State(state): State<AppState>, Path(repo_id): Path<i64>) -> impl IntoResponse {
+    read_json(&state.db_path, |db| db.list_fetch_logs(repo_id, 20))
+}
+
+#[derive(Debug, Deserialize)]
+struct MoveRequest {
+    #[serde(rename = "targetRootId")]
+    target_root_id: i64,
+}
+
+async fn move_repo_handler(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    Json(request): Json<MoveRequest>,
+) -> impl IntoResponse {
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        let repo = db
+            .find_repo_by_id(repo_id)?
+            .ok_or_else(|| xingshu_core::types::VcsError::Database("repository not found".to_owned()))?;
+        let roots = db.list_roots()?;
+        let source_root = roots
+            .iter()
+            .find(|r| r.id == Some(repo.root_id))
+            .ok_or_else(|| xingshu_core::types::VcsError::Database("source root not found".to_owned()))?;
+        let target_root = roots
+            .iter()
+            .find(|r| r.id == Some(request.target_root_id))
+            .ok_or_else(|| xingshu_core::types::VcsError::Database("target root not found".to_owned()))?;
+        let source = source_root.path.join(&repo.rel_path);
+        let dest = xingshu_core::mover::move_repo(
+            &source_root.path,
+            &source,
+            &target_root.path,
+            &repo.rel_path,
+        )?;
+        db.update_repo_location(repo_id, request.target_root_id, &repo.rel_path)?;
+        Ok::<_, xingshu_core::types::VcsError>(json!({ "path": dest.to_string_lossy() }))
+    })();
+    match result {
+        Ok(value) => (StatusCode::OK, Json(camelize_value(value))).into_response(),
+        Err(error) => error_response(error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyRequest {
+    #[serde(alias = "pullStrategy", alias = "pull_strategy", alias = "strategy")]
+    pull_strategy: Option<String>,
+    #[serde(alias = "conflict")]
+    conflict: Option<String>,
+    #[serde(alias = "unattended")]
+    unattended: Option<String>,
+    #[serde(alias = "pullConflictPolicy")]
+    pull_conflict_policy: Option<String>,
+    #[serde(alias = "unattendedConflictPolicy")]
+    unattended_conflict_policy: Option<String>,
+}
+
+async fn get_repo_policy(State(state): State<AppState>, Path(repo_id): Path<i64>) -> impl IntoResponse {
+    read_json(&state.db_path, |db| {
+        db.repo_policy(repo_id).map(|opt| opt.unwrap_or_else(|| {
+            let mut p = xingshu_core::types::Policy {
+                id: None,
+                repo_id: Some(repo_id),
+                tag_id: None,
+                pull_strategy: "fetch-only".to_owned(),
+                fetch_schedule: None,
+                depth: "full".to_owned(),
+                auto_tag: false,
+                pull_conflict_policy: "stop".to_owned(),
+                unattended_conflict_policy: "abort".to_owned(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            // try default for kind if repo exists
+            if let Ok(Some(repo)) = db.find_repo_by_id(repo_id) {
+                let def = xingshu_core::policy::default_for_kind(&repo.repo_kind);
+                p.pull_strategy = def.pull_strategy;
+                p.pull_conflict_policy = match def.conflict_action {
+                    xingshu_core::policy::PullConflictAction::Stop => "stop",
+                    xingshu_core::policy::PullConflictAction::Backup => "backup",
+                    xingshu_core::policy::PullConflictAction::Overwrite => "overwrite",
+                    xingshu_core::policy::PullConflictAction::Abort => "abort",
+                }
+                .to_owned();
+                p.unattended_conflict_policy = match def.unattended_action {
+                    xingshu_core::policy::PullConflictAction::Stop => "stop",
+                    xingshu_core::policy::PullConflictAction::Backup => "backup",
+                    xingshu_core::policy::PullConflictAction::Overwrite => "overwrite",
+                    xingshu_core::policy::PullConflictAction::Abort => "abort",
+                }
+                .to_owned();
+            }
+            p
+        }))
+    })
+}
+
+async fn set_repo_policy(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    Json(request): Json<PolicyRequest>,
+) -> impl IntoResponse {
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        if db.find_repo_by_id(repo_id)?.is_none() {
+            return Err(xingshu_core::types::VcsError::Database("repository not found".to_owned()));
+        }
+        let existing = db.repo_policy(repo_id)?;
+        let pull_strategy = request
+            .pull_strategy
+            .or(request.pull_conflict_policy.clone())
+            .unwrap_or_else(|| existing.as_ref().map(|p| p.pull_strategy.clone()).unwrap_or_else(|| "fetch-only".to_owned()));
+        let conflict = request
+            .conflict
+            .or(request.pull_conflict_policy.clone())
+            .unwrap_or_else(|| existing.as_ref().map(|p| p.pull_conflict_policy.clone()).unwrap_or_else(|| "stop".to_owned()));
+        let unattended = request
+            .unattended
+            .or(request.unattended_conflict_policy.clone())
+            .unwrap_or_else(|| existing.as_ref().map(|p| p.unattended_conflict_policy.clone()).unwrap_or_else(|| "abort".to_owned()));
+        // validation
+        if !matches!(pull_strategy.as_str(), "fetch-only" | "mirror" | "no-update" | "archive") {
+            return Err(xingshu_core::types::VcsError::GitCommand(format!("invalid pull strategy: {pull_strategy}")));
+        }
+        xingshu_core::policy::PullConflictAction::try_from(conflict.as_str())?;
+        xingshu_core::policy::PullConflictAction::try_from(unattended.as_str())?;
+        let now = chrono::Utc::now();
+        let policy = xingshu_core::types::Policy {
+            id: None,
+            repo_id: Some(repo_id),
+            tag_id: None,
+            pull_strategy,
+            fetch_schedule: None,
+            depth: "full".to_owned(),
+            auto_tag: false,
+            pull_conflict_policy: conflict,
+            unattended_conflict_policy: unattended,
+            created_at: now,
+            updated_at: now,
+        };
+        db.set_repo_policy(&policy)?;
+        Ok::<_, xingshu_core::types::VcsError>(())
+    })();
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error_response(error.to_string()),
+    }
+}
+
+async fn get_tag_policy(State(state): State<AppState>, Path(tag_id): Path<i64>) -> impl IntoResponse {
+    read_json(&state.db_path, |db| db.tag_policy(tag_id))
+}
+
+async fn set_tag_policy(
+    State(state): State<AppState>,
+    Path(tag_id): Path<i64>,
+    Json(request): Json<PolicyRequest>,
+) -> impl IntoResponse {
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        if db.find_tag_by_id(tag_id)?.is_none() {
+            return Err(xingshu_core::types::VcsError::Database("tag not found".to_owned()));
+        }
+        let existing = db.tag_policy(tag_id)?;
+        let pull_strategy = request
+            .pull_strategy
+            .unwrap_or_else(|| existing.as_ref().map(|p| p.pull_strategy.clone()).unwrap_or_else(|| "fetch-only".to_owned()));
+        let conflict = request.conflict.unwrap_or_else(|| existing.as_ref().map(|p| p.pull_conflict_policy.clone()).unwrap_or_else(|| "stop".to_owned()));
+        let unattended = request.unattended.unwrap_or_else(|| existing.as_ref().map(|p| p.unattended_conflict_policy.clone()).unwrap_or_else(|| "abort".to_owned()));
+        if !matches!(pull_strategy.as_str(), "fetch-only" | "mirror" | "no-update" | "archive") {
+            return Err(xingshu_core::types::VcsError::GitCommand(format!("invalid pull strategy: {pull_strategy}")));
+        }
+        xingshu_core::policy::PullConflictAction::try_from(conflict.as_str())?;
+        xingshu_core::policy::PullConflictAction::try_from(unattended.as_str())?;
+        let now = chrono::Utc::now();
+        let policy = xingshu_core::types::Policy {
+            id: None,
+            repo_id: None,
+            tag_id: Some(tag_id),
+            pull_strategy,
+            fetch_schedule: None,
+            depth: "full".to_owned(),
+            auto_tag: false,
+            pull_conflict_policy: conflict,
+            unattended_conflict_policy: unattended,
+            created_at: now,
+            updated_at: now,
+        };
+        db.set_tag_policy(&policy)?;
+        Ok::<_, xingshu_core::types::VcsError>(())
+    })();
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error_response(error.to_string()),
     }
 }
