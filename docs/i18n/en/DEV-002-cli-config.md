@@ -1,6 +1,6 @@
 # CLI and Configuration
 
-Install WebUI dependencies from `webui/` with `pnpm --ignore-workspace install`; a normal install can discover the parent workspace. Vite uses port `12680`; the Axum API and built UI use `12681`.
+Prefer `mise run setup` (`mise.toml`); installing WebUI deps separately from `webui/` still requires `pnpm --ignore-workspace install` because the project sits inside a parent workspace. Vite uses port `12680`; the Axum API and built UI use `12681`; one-shot start is `mise run dev`.
 
 The CLI provides `roots`, `scan`, `list`, `tag`, `untag`, `kind`, `policy`, `pull`, `move`, and `stats`. Xingshu tags are domain labels owned by Xingshu, not Git tags. Repository policy overrides tag policy.
 

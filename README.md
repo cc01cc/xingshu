@@ -76,36 +76,37 @@ xingshu stats
 
 ## Development
 
-### Development Mode
-
-Use a new staging run for development data:
+### Development Mode (mise, recommended)
 
 ```powershell
-pwsh -NoProfile -File .\scripts\create-test-staging.ps1 -TargetRoot .\.staging\dev-<run-id>
-$env:XINGSHU_DB = ".staging\dev-<run-id>\xingshu.db"
+# 1. Install deps (Rust + WebUI)
+mise run setup
+
+# 2. Create a fresh staging run (synthetic, never writes real S:\zeogit-ref)
+mise run staging:dev --run-id dev-001
+$env:XINGSHU_DB = ".staging/dev-001/xingshu.db"
+
+# 3. Start server (12681) + Vite (12680, proxies /api to 12681) in parallel
+mise run dev          # == mise run dev:host, Ctrl+C cleans up both
 ```
 
-Run the backend and Vite in separate terminals:
-
-Terminal 1:
+- Vite: http://127.0.0.1:12680  ·  API/built WebUI: http://127.0.0.1:12681  ·  Health: http://127.0.0.1:12681/health
+- Add roots in Settings → click **扫描索引** (or `POST /api/v1/tasks {type:scan}`); repos appear in the repository table.
+- Raw cargo/pnpm equivalent (two terminals):
 
 ```powershell
 $env:XINGSHU_PORT = "12681"
 cargo run -p xingshu-server
-```
-
-Terminal 2:
-
-```powershell
+# terminal 2
 cd webui
 pnpm --ignore-workspace run dev -- --host 127.0.0.1
 ```
 
-Open `http://127.0.0.1:12680` for Vite development. Its `/api` and `/health` requests proxy to the backend at `http://127.0.0.1:12681`. The backend also serves the production bundle at `http://127.0.0.1:12681` after `pnpm run build`.
-
 ### Validation
 
 ```powershell
+mise run validate      # lint + typecheck + build + test
+# or bare commands
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -115,3 +116,5 @@ pnpm --ignore-workspace install
 pnpm run typecheck
 pnpm run build
 ```
+
+Other mise entries: `mise run dev:server/dev:ui/setup/build/test/lint/typecheck/clean/staging` — see `mise.toml`.

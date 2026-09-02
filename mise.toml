@@ -1,0 +1,120 @@
+[env]
+XINGSHU_PORT = "12681"
+
+[tools]
+node = "22"
+pnpm = "10"
+rust = "1.88"
+
+[tasks.setup]
+depends = ["setup:ui", "setup:runtime"]
+description = "Install dependencies for all modules"
+alias = "setup"
+
+[tasks."setup:ui"]
+run = "pnpm --ignore-workspace install"
+description = "Install WebUI dependencies"
+dir = "webui"
+alias = "setup:ui"
+
+[tasks."setup:runtime"]
+run = "cargo fetch"
+description = "Fetch Rust dependencies"
+alias = "setup:runtime"
+
+[tasks.dev]
+depends = ["dev:host"]
+description = "Start server + WebUI (recommended daily entry)"
+alias = "dev"
+
+[tasks."dev:host"]
+run = [{ tasks = ["dev:host:server", "dev:host:ui"] }]
+description = "Run 12681 server and 12680 Vite in parallel (Ctrl+C cleans up)"
+alias = "dev:host"
+
+[tasks."dev:host:server"]
+run = "cargo run -p xingshu-server"
+description = "Start Rust API server on 12681"
+env = { XINGSHU_LOG_LEVEL = "info" }
+
+[tasks."dev:host:ui"]
+run = "pnpm --ignore-workspace run dev -- --host 127.0.0.1 --port 12680 --strictPort"
+description = "Start Vite dev server on 12680 (proxies /api to 12681)"
+dir = "webui"
+
+[tasks."dev:server"]
+run = "cargo run -p xingshu-server"
+description = "Start Rust API server only"
+alias = "dev:server"
+
+[tasks."dev:ui"]
+run = "pnpm --ignore-workspace run dev"
+description = "Start Vite dev server only"
+dir = "webui"
+alias = "dev:ui"
+
+[tasks.build]
+depends = ["build:runtime", "build:ui"]
+description = "Build all production artifacts"
+alias = "build"
+
+[tasks."build:runtime"]
+run = "cargo build --workspace --release"
+description = "Build Rust workspace (release)"
+alias = "build:runtime"
+
+[tasks."build:ui"]
+run = "pnpm --ignore-workspace run build"
+description = "Build WebUI bundle"
+dir = "webui"
+alias = "build:ui"
+
+[tasks.test]
+run = "cargo test --workspace"
+description = "Run all Rust tests"
+alias = "test"
+
+[tasks."test:ui"]
+run = "pnpm --ignore-workspace run typecheck"
+description = "Run WebUI typecheck"
+dir = "webui"
+alias = "test:ui"
+
+[tasks.lint]
+depends = ["lint:core", "lint:fmt"]
+description = "Run all linters"
+alias = "lint"
+
+[tasks."lint:core"]
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+description = "Run clippy (deny warnings)"
+
+[tasks."lint:fmt"]
+run = "cargo fmt --all -- --check"
+description = "Check Rust formatting"
+
+[tasks.typecheck]
+run = "pnpm --ignore-workspace run typecheck"
+description = "Run WebUI typecheck (vue-tsc)"
+dir = "webui"
+alias = "typecheck"
+
+[tasks.validate]
+depends = ["lint", "typecheck", "build", "test"]
+description = "Run all quality gates — lint + typecheck + build + test"
+alias = "validate"
+
+[tasks.clean]
+run = "cargo clean; rm -rf webui/dist webui/node_modules/.vite"
+description = "Remove build artifacts and temp caches"
+alias = "clean"
+
+[tasks.staging]
+run = 'pwsh -NoProfile -File scripts/create-test-staging.ps1'
+description = "Create new synthetic .staging run (never writes real S:\\zeogit-ref)"
+alias = "staging"
+
+[tasks."staging:dev"]
+run = 'pwsh -NoProfile -File scripts/create-test-staging.ps1 -TargetRoot .staging/dev-{{arg(name="run-id", default="001")}}'
+description = "Create dev staging run under .staging/dev-<run-id>"
+alias = "staging:dev"

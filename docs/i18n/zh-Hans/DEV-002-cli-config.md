@@ -2,7 +2,7 @@
 
 ## 安装与端口
 
-从 `webui/` 安装必须使用 `pnpm --ignore-workspace install`，因为项目位于 workspace 根目录下。WebUI dev 端口为 `12680`，Axum API 和构建后 WebUI 端口为 `12681`。
+首选 `mise run setup`（`mise.toml`）安装依赖；从 `webui/` 单独安装仍必须使用 `pnpm --ignore-workspace install`，因为项目位于 workspace 根目录下（`A08-xingshu/AGENTS.md:16`）。WebUI dev 端口为 `12680`，Axum API 和构建后 WebUI 端口为 `12681`，一键启动见 `mise run dev`。
 
 ## 常用流程
 

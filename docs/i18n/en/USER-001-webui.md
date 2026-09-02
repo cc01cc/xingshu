@@ -1,8 +1,18 @@
 # WebUI
 
-The Axum server on `12681` serves the built UI. During development, Vite runs on `12680` and proxies `/api` and `/health` to `12681`.
+Prefer `mise run dev` (`mise.toml`, mirrors A03-xihe): runs Axum on `12681` and Vite on `12680` in parallel (`/api`/`/health` proxied to `12681`), `Ctrl+C` stops both; raw fallback is `cargo run -p xingshu-server` plus `cd webui && pnpm --ignore-workspace run dev`. The built bundle is served by Axum on `12681`.
 
-The UI provides a searchable repository table, Xingshu domain-tag management, a repository detail drawer, a disk summary, conflict decisions, and asynchronous scan/batch-pull progress. Batch pull starts with `conflictMode=ask`, so a conflicting repository is shown in a decision list while other repositories continue. The three conflict actions are backup-and-pull, overwrite-local-state, and abort. Xingshu tags never create or modify Git tags.
+## Pages
+
+- Repositories: search, tag filter, kind/lock status, detail drawer; empty states link to Settings for the scan CTA (`No index yet — scan in Settings`).
+- Tags: create domain labels and jump to filtered lists.
+- Disk dashboard: indexed count, bytes, and decision backlog.
+- Settings: root management (absolute path → Add, multiple roots across disks), hint `Scanning is required after adding roots`, primary CTA `Scan (N roots)` with `Indexed N / Not yet scanned` copy; scanning an empty dir such as `Z:\TEST` yielding 0 is expected.
+- Header: `REPOSITORY INDEX` titles are `Repositories/Tags/Disk/Settings`, matching sidebar `repos/tags/disks/settings`.
+- Conflicts: per dirty/conflict repo choose backup-and-pull / overwrite-local / abort.
+- Async tasks: `Scan` and `Batch pull` in the sidebar (also in Settings) create background tasks; the panel uses Chinese labels (Success/Aborted/Skipped/Failed/Needs decision), capsule badges, a table (repo/status/result/duration/backup/error) and scan stats, maps `Failed to fetch` to a local-service hint for `12681`, and keeps raw JSON collapsed for debugging.
+
+Batch pull starts with `conflictMode=ask`, so a conflicting repository is shown in a decision list while other repositories continue. The three conflict actions are backup-and-pull, overwrite-local-state, and abort. Xingshu tags never create or modify Git tags.
 
 ## Asynchronous tasks
 

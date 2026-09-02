@@ -1,17 +1,20 @@
 # 开发与测试
 
-## 开发态启动
+## 开发态启动（mise 首选，对齐 A03-xihe）
 
-必须使用新的 staging run：
+```powershell
+mise run setup
+mise run staging:dev --run-id dev-001
+$env:XINGSHU_DB = ".staging/dev-001/xingshu.db"
+mise run dev          # == dev:host → 12681 server + 12680 Vite 并行，Ctrl+C 同停
+```
+
+等价裸命令（双终端）：
 
 ```powershell
 pwsh -NoProfile -File .\scripts\create-test-staging.ps1 -TargetRoot .\.staging\dev-<run-id>
 $env:XINGSHU_DB = ".staging\dev-<run-id>\xingshu.db"
-```
 
-在两个终端分别启动：
-
-```powershell
 # 终端 1：Rust API
 $env:XINGSHU_PORT = "12681"
 cargo run -p xingshu-server
@@ -21,11 +24,18 @@ cd webui
 pnpm --ignore-workspace run dev -- --host 127.0.0.1
 ```
 
-Vite 使用 `12680`，并将 `/api` 与 `/health` 代理至 `12681`；server 在构建完成后也可直接托管 `webui/dist`。
+Vite 使用 `12680`，并将 `/api` 与 `/health` 代理至 `12681`；server 在构建完成后也可直接托管 `webui/dist`。在设置页添加根目录后，点击 **扫描索引** 再查看仓库列表。
 
 ## 基础验证命令
 
 ```powershell
+mise run validate     # lint + typecheck + build + test
+# 细粒度
+mise run lint        # clippy + fmt --check
+mise run typecheck   # vue-tsc
+mise run build
+mise run test
+# 裸命令
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -35,6 +45,8 @@ pnpm --ignore-workspace install
 pnpm run typecheck
 pnpm run build
 ```
+
+更多入口见根 `mise.toml`：`dev:server/dev:ui/setup/clean/staging`。
 
 ## 测试分层
 

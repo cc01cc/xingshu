@@ -21,6 +21,17 @@
 
 ## Commands
 
+Preferred (mise, mirrors A03-xihe):
+
+```powershell
+mise run setup        # pnpm --ignore-workspace install + cargo fetch
+mise run dev          # == dev:host → 12681 server + 12680 Vite in parallel
+mise run validate     # lint + typecheck + build + test
+mise run staging:dev --run-id dev-001   # new .staging/dev-<run-id>
+```
+
+Raw equivalents:
+
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -31,6 +42,8 @@ pnpm --ignore-workspace install
 pnpm run typecheck
 pnpm run build
 ```
+
+See `mise.toml` for `dev:server/dev:ui/build/test/lint/typecheck/clean/staging`.
 
 ## Structure
 
@@ -48,3 +61,13 @@ pnpm run build
 - `public`: filtered public release repository
 
 Do not push credentials, staging data, runtime databases, `target/`, or `webui/node_modules/`.
+
+## Backup & Conflict
+
+- `third-party`/`third-party-frozen` 为只读，`modify_lock=1`；`fork/own` 可写。`repo_kind` 首次启发后重扫不覆盖，需 `kind set` 显式改。
+- 拉取冲突（工作区脏或非 fast-forward）策略：`Stop` 直给 `ConflictNeedsDecision`，`Abort` 跳过，`Backup` 走 `fs::rename → .bak.<YYYYMMDDHHmmSS.mmm>`（同父目录、原子移动、已存在则 `_1`/`_2` 递增，`scanner` 通过 `*.bak.*`/`*.broken.*` 忽略），`Overwrite` 走 `reset --hard + clean -fd + pull --ff-only`。
+- 备份后拉取为**全量重克隆** `git clone <remote_url> <name>`，非增量 `fetch`；无 `remote_url` 时拒绝克隆并保留备份。
+
+## Output Readability
+
+- `webui/src/App.vue` 不直接渲染 `task.resultJson` 原串；`parsedTaskResult / labelResult / labelStatus / formatDuration / taskSummaryText` 解析并中文标签化（成功/已中止/已跳过/失败/冲突需决策），胶囊徽章+表格+扫描统计，`Failed to fetch` 映射为中文服务检查提示。详见 `docs/i18n/zh-Hans/DEV-006-backup-output.md` 与根 skill `readable-output`。
