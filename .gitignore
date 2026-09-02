@@ -7,3 +7,13 @@
 *.db-wal
 *.bak.*
 *.broken.*
+
+# Playwright CLI runtime data (logs/snapshots/screenshots) per skill
+.playwright-cli/
+test-results/
+playwright-report/
+blob-report/
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/
+
