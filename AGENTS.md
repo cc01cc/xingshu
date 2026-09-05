@@ -45,13 +45,27 @@ pnpm run build
 
 See `mise.toml` for `dev:server/dev:ui/build/test/lint/typecheck/clean/staging`.
 
+## Staging 与 E2E（真实数据手册）
+
+- 真实数据基线（只读 `S:\zeogit-ref`，绝不写源）：`real-mini-001`（6 真仓约 963MB）与 `real-edge-001`（9 仓，含 bare/nested/bak/dirty）均位于 `.staging/`（已 gitignore）；双 DB（`real-mini-001/xingshu.db`、`real-edge-001/xingshu.db`）为回归基线。
+- 重建：`pwsh scripts/create-real-test-staging.ps1 [-WithEdgeCases]`（底层走 `stage-sample.ps1 -Repository @(...) -Execute`，拷贝后校验 `.git` 与文件数，再 `roots add` + `scan`）。
+- 手动测试：`$env:XINGSHU_DB='<root>/xingshu.db'` 后 `cargo run -p xingshu-server`（12681）+ Vite `pnpm --ignore-workspace run dev -- --host 127.0.0.1 --port 12680 --strictPort`；浏览器打开 `http://127.0.0.1:12680`。
+
+## E2E 排障三件套
+
+- `validate-plan.py` 路径：`uv run .agents/skills/plan-mode/scripts/validate-plan.py plans/PLAN-XXX.md`（workspace 根执行）。
+- `playwright-cli` 直接调用（禁 `npx` 前缀，防 npm 初始化延迟与 `Unknown project config` 噪音）；每条命令带 bash timeout。
+- `e2e/playwright.config.ts` 的 `webServer.cwd` 必须指向项目根，否则 `ServeDir webui/dist` 相对路径 404；`webServer` 会重建 `.staging/e2e-playwright` 合成 5 仓。
+
 ## Structure
 
 - `crates/xingshu-core/`: SQLite、scanner、Git backend、policy、puller、mover
 - `crates/xingshu-cli/`: `xingshu` binary
 - `crates/xingshu-server/`: localhost Axum API and static WebUI host
 - `webui/`: Vue/Vite UI
+- `e2e/`: Playwright CLI E2E（`playwright.config.ts` + `tests/xingshu.spec.ts` 11 用例 + `scripts/start-e2e-server.ps1`）
 - `scripts/create-test-staging.ps1`: only synthetic staging generator
+- `scripts/create-real-test-staging.ps1`: real-git staging helper（读 `S:\zeogit-ref`，写 `.staging/`）
 - `scripts/stage-sample.ps1`: guarded copy helper, dry-run by default
 - `docs/`: project documentation and API contract
 
