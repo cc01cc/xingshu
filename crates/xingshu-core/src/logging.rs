@@ -145,6 +145,36 @@ pub fn redact_path(path: &Path) -> String {
         .unwrap_or_else(|| "<root>".to_owned())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotationConfig {
+    pub path: PathBuf,
+    pub max_bytes: u64,
+    pub max_files: u32,
+}
+
+pub fn resolve_log_level() -> String {
+    std::env::var("XINGSHU_LOG_LEVEL")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".to_owned())
+}
+
+pub fn resolve_rotation() -> Option<RotationConfig> {
+    let path = std::env::var_os("XINGSHU_LOG_FILE").map(PathBuf::from)?;
+    let max_bytes = std::env::var("XINGSHU_LOG_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10 * 1024 * 1024);
+    let max_files = std::env::var("XINGSHU_LOG_MAX_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(7);
+    Some(RotationConfig {
+        path,
+        max_bytes,
+        max_files,
+    })
+}
+
 pub fn valid_request_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128

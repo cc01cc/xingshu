@@ -2,7 +2,7 @@ param()
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path "$PSScriptRoot/../..").Path
 $Staging = Join-Path $ProjectRoot ".staging/e2e-playwright"
-$Db = Join-Path $Staging "xingshu.db"
+$Db = Join-Path $Staging "xingshu-test.db"
 
 # 端口预检：残留的上一轮 server 会让本轮 409（pull task already running），必须先清场
 $portListeners = Get-NetTCPConnection -LocalPort 12681 -State Listen -ErrorAction SilentlyContinue

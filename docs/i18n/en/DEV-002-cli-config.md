@@ -5,3 +5,5 @@ Prefer `mise run setup` (`mise.toml`); installing WebUI deps separately from `we
 The CLI provides `roots`, `scan`, `list`, `tag`, `untag`, `kind`, `policy`, `pull`, `move`, and `stats`. Xingshu tags are domain labels owned by Xingshu, not Git tags. Repository policy overrides tag policy.
 
 Interactive pull conflicts default to `stop`; unattended conflicts default to `abort`. `scan_nested_repos` is disabled by default and `scan_skip_dirs` prunes large non-repository trees.
+
+Database files follow `xingshu-<env>.db` (`xingshu-dev.db` / `xingshu-prod.db` / `xingshu-test.db`). Precedence: explicit `--db` > `XINGSHU_DB` > default (`.staging/dev-001/xingshu-dev.db`, or `./xingshu-prod.db` with `XINGSHU_ENV=prod`). Prod refuses paths under `.staging/`; the server logs the resolved database path at startup.

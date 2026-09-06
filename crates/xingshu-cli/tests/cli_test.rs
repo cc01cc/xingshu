@@ -30,7 +30,7 @@ fn cli_runs_real_process_index_tag_policy_and_filter_flow() {
     fs::write(root.join("README.md"), "cli fixture\n").expect("fixture");
     git(&root, &["add", "README.md"]);
     git(&root, &["commit", "-q", "-m", "fixture"]);
-    let db = temp.path().join("xingshu.db");
+    let db = temp.path().join("xingshu-test.db");
     let binary = env!("CARGO_BIN_EXE_xingshu");
     for args in [
         vec![

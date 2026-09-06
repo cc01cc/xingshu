@@ -27,7 +27,7 @@ Preferred (mise, mirrors A03-xihe):
 mise run setup        # pnpm --ignore-workspace install + cargo fetch
 mise run dev          # == dev:host → 12681 server + 12680 Vite in parallel
 mise run validate     # lint + typecheck + build + test
-mise run staging:dev --run-id dev-001   # new .staging/dev-<run-id>
+mise run staging:dev --run-id dev-001   # new .staging/<run-id>, default dev-001
 ```
 
 Raw equivalents:
@@ -47,22 +47,25 @@ See `mise.toml` for `dev:server/dev:ui/build/test/lint/typecheck/clean/staging`.
 
 ## Staging 与 E2E（真实数据手册）
 
-- 真实数据基线（只读 `S:\zeogit-ref`，绝不写源）：`real-mini-001`（6 真仓约 963MB）与 `real-edge-001`（9 仓，含 bare/nested/bak/dirty）均位于 `.staging/`（已 gitignore）；双 DB（`real-mini-001/xingshu.db`、`real-edge-001/xingshu.db`）为回归基线。
+- 数据库文件名统一规范 `xingshu-<env>.db`：dev 默认 `.staging/dev-001/xingshu-dev.db`，prod 默认 `./xingshu-prod.db`；优先级为显式 `--db` > `XINGSHU_DB` > 默认值；prod 下 `.staging/` 路径拒绝启动；server 启动首行打印实际库路径。
+- 真实数据基线（只读 `S:\zeogit-ref`，绝不写源）：`real-mini-001`（6 真仓约 963MB）与 `real-edge-001`（9 仓，含 bare/nested/bak/dirty）均位于 `.staging/`（已 gitignore）；双 DB（`real-mini-001/xingshu-dev.db`、`real-edge-001/xingshu-dev.db`）为回归基线。
 - 重建：`pwsh scripts/create-real-test-staging.ps1 [-WithEdgeCases]`（底层走 `stage-sample.ps1 -Repository @(...) -Execute`，拷贝后校验 `.git` 与文件数，再 `roots add` + `scan`）。
-- 手动测试：`$env:XINGSHU_DB='<root>/xingshu.db'` 后 `cargo run -p xingshu-server`（12681）+ Vite `pnpm --ignore-workspace run dev -- --host 127.0.0.1 --port 12680 --strictPort`；浏览器打开 `http://127.0.0.1:12680`。
+- 手动测试：缺省即进 dev 库，直接 `cargo run -p xingshu-server`（12681）+ Vite `pnpm --ignore-workspace run dev`（host/port 以 `webui/vite.config.ts` 为准：`127.0.0.1:12680`）；浏览器打开 `http://127.0.0.1:12680`。换 run 才设 `$env:XINGSHU_DB`；生产库用 `mise run prod:server`。
 
 ## E2E 排障三件套
 
 - `validate-plan.py` 路径：`uv run .agents/skills/plan-mode/scripts/validate-plan.py plans/PLAN-XXX.md`（workspace 根执行）。
 - `playwright-cli` 直接调用（禁 `npx` 前缀，防 npm 初始化延迟与 `Unknown project config` 噪音）；每条命令带 bash timeout。
 - `e2e/playwright.config.ts` 的 `webServer.cwd` 必须指向项目根，否则 `ServeDir webui/dist` 相对路径 404；`webServer` 会重建 `.staging/e2e-playwright` 合成 5 仓。
+- **git 组合参数拆分**（PLAN-250 实测）：`run_git` 的 args 数组中，带空格的组合 revspec（如 `"HEAD ^<base>"`）会被 git 当作单个无效参数静默失败（`rev-list --count` 返回 0）——必须拆成独立元素 `&["rev-list", "--count", from, &format!("^{base}")]`。
+- **git cherry 方向**：`git cherry <upstream> <head>` 列出 head 侧提交，`-` 行为 patch 等价（上游已有同内容提交）；配对本地/上游提交用 patch-id 反查，不要假设方向。
 
 ## Structure
 
 - `crates/xingshu-core/`: SQLite、scanner、Git backend、policy、puller、mover
 - `crates/xingshu-cli/`: `xingshu` binary
 - `crates/xingshu-server/`: localhost Axum API and static WebUI host
-- `webui/`: Vue/Vite UI
+- `webui/`: Vue/Vite + Tailwind v4 + shadcn-vue UI（组件 vendor 于 `src/components/ui/`，主题 token 见 `src/shadcn-theme.css`；新依赖用 `pnpm --ignore-workspace add <pkg>@<version>` 并过 7 天冷却与构建脚本评审）
 - `e2e/`: Playwright CLI E2E（`playwright.config.ts` + `tests/xingshu.spec.ts` 15 用例 + `scripts/start-e2e-server.ps1`；含 dirty/diverged 冲突面板、open API、favicon 用例）
 - `scripts/create-test-staging.ps1`: only synthetic staging generator
 - `scripts/create-real-test-staging.ps1`: real-git staging helper（读 `S:\zeogit-ref`，写 `.staging/`）

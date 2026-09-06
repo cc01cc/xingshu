@@ -53,7 +53,7 @@ if ($WithEdgeCases) {
 }
 
 # Initialize DB and scan
-$db = Join-Path $TargetRoot "xingshu.db"
+$db = Join-Path $TargetRoot "xingshu-dev.db"
 Write-Host "Registering root and scanning -> $db"
 & cargo run --manifest-path "$PSScriptRoot/../Cargo.toml" -p xingshu-cli -- --db $db roots add $TargetRoot | Out-Null
 & cargo run --manifest-path "$PSScriptRoot/../Cargo.toml" -p xingshu-cli -- --db $db scan | Out-String -Width 300 | Write-Host

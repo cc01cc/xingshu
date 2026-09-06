@@ -6,7 +6,7 @@ import fs from "node:fs";
 // E2E uses synthetic staging under .staging/e2e-playwright, populated before server start.
 // WebServer command is a PowerShell script that recreates staging and starts xingshu-server.
 const E2E_STAGING = path.resolve("..", ".staging", "e2e-playwright");
-const E2E_DB = path.join(E2E_STAGING, "xingshu.db");
+const E2E_DB = path.join(E2E_STAGING, "xingshu-test.db");
 
 // Ensure .playwright-cli output dir exists and is gitignored
 const pwCliDir = path.resolve("..", ".playwright-cli");

@@ -1,6 +1,6 @@
 # 数据库 Schema
 
-默认数据库为 `xingshu.db`，使用 SQLite WAL。当前 schema ledger 版本为 `4`。所有表都包含 `created_at` 与 `updated_at`，由核心写操作维护。
+数据库文件名统一规范 `xingshu-<env>.db`，使用 SQLite WAL：dev 默认 `.staging/dev-001/xingshu-dev.db`，`XINGSHU_ENV=prod` 时默认 `./xingshu-prod.db`（显式 `--db` / `XINGSHU_DB` 优先）。当前 schema ledger 版本为 `4`。所有表都包含 `created_at` 与 `updated_at`，由核心写操作维护。
 
 ## 表
 

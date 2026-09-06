@@ -7,11 +7,15 @@
 ## 常用流程
 
 ```powershell
-.\target\release\xingshu.exe --db .\.staging\run-001\xingshu.db roots add .\.staging\run-001\root-a
-.\target\release\xingshu.exe --db .\.staging\run-001\xingshu.db scan --my-org cc01cc
-.\target\release\xingshu.exe --db .\.staging\run-001\xingshu.db tag network/third-party-demo network
-.\target\release\xingshu.exe --db .\.staging\run-001\xingshu.db list --tag network
+.\target\release\xingshu.exe --db .\.staging\run-001\xingshu-dev.db roots add .\.staging\run-001\root-a
+.\target\release\xingshu.exe --db .\.staging\run-001\xingshu-dev.db scan --my-org cc01cc
+.\target\release\xingshu.exe --db .\.staging\run-001\xingshu-dev.db tag network/third-party-demo network
+.\target\release\xingshu.exe --db .\.staging\run-001\xingshu-dev.db list --tag network
 ```
+
+## 数据库选择
+
+数据库文件名统一规范 `xingshu-<env>.db`（`xingshu-dev.db` / `xingshu-prod.db` / `xingshu-test.db`）。优先级：显式 `--db` > `XINGSHU_DB` > 默认值；`XINGSHU_ENV=prod` 时默认 `./xingshu-prod.db`，否则默认 `.staging/dev-001/xingshu-dev.db`。prod 下指向 `.staging/` 内路径会拒绝启动（残留变量保护）；server 启动首行日志打印实际库路径。
 
 `TAGS` 是星枢自己的领域标签，不是 Git tag。`repo_kind` 区分第三方、冻结、fork 和自有仓库；`policy set` 可设置 repo 或 tag 的更新和冲突策略，repo policy 优先。
 

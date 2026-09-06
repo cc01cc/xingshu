@@ -4,6 +4,22 @@ All notable changes to Xingshu are recorded here.
 
 ## Unreleased
 
+### WebUI redesign (shadcn-vue)
+
+- WebUI now uses Tailwind CSS v4 with vendored shadcn-vue components (Reka UI primitives, lucide icons, neutral theme mapped to the dark gold palette).
+- Typography floor: body text ≥12px with CJK-friendly line heights; Inter is bundled locally (offline-safe, OFL-1.1).
+- Unicode glyph icons replaced with lucide SVG icons; copy-path buttons use a 16px copy icon with brighter contrast.
+- Detail drawer is now a Sheet with formatted fetch history (`YYYY-MM-DD HH:mm:ss`, strategy, result badge).
+- The kind picker confirms before switching and explains the read-only convention flip; the "modify lock" label is now "read-only convention" with a hover explanation.
+- Added visual regression baselines for the repository list, drawer, and settings views (`e2e/tests/visual.spec.ts`).
+
+### Changed (BREAKING file layout)
+
+- Database files now follow `xingshu-<env>.db`: dev defaults to `.staging/dev-001/xingshu-dev.db`, prod to `./xingshu-prod.db` (via `XINGSHU_ENV=prod` / `mise run prod:server`).
+- Database precedence is now explicit `--db` > `XINGSHU_DB` > default; `xingshu-cli --db` also honors `XINGSHU_DB`.
+- Prod refuses database paths under `.staging/`; the server logs the resolved database path at startup.
+- Migration (one step): rename a local legacy root `xingshu.db` to `xingshu-prod.db`.
+
 - Added the Rust workspace, embeddable core, SQLite index, CLI, Axum API, and Vue WebUI.
 - Added synthetic staging generation and repository-kind safety rules.
 - Added bilingual documentation, structured JSONL logging, request IDs, Problem Details, real-process tests, and Playwright MCP staging verification.

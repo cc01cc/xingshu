@@ -34,12 +34,18 @@ alias = "dev:host"
 
 [tasks."dev:host:server"]
 run = "cargo run -p xingshu-server"
-description = "Start Rust API server on 12681"
-env = { XINGSHU_LOG_LEVEL = "info" }
+description = "Start Rust API server on 12681 (dev DB by default; parent XINGSHU_DB wins)"
+env = { XINGSHU_LOG_LEVEL = "info", XINGSHU_ENV = "dev" }
+
+[tasks."prod:server"]
+run = "cargo run -p xingshu-server"
+description = "Start Rust API server on 12681 against the prod DB (refuses .staging paths)"
+env = { XINGSHU_LOG_LEVEL = "info", XINGSHU_ENV = "prod" }
+alias = "prod:server"
 
 [tasks."dev:host:ui"]
-run = "pnpm --ignore-workspace run dev -- --host 127.0.0.1 --port 12680 --strictPort"
-description = "Start Vite dev server on 12680 (proxies /api to 12681)"
+run = "pnpm --ignore-workspace run dev"
+description = "Start Vite dev server on 127.0.0.1:12680 (host/port/strictPort from vite.config.ts, proxies /api to 12681)"
 dir = "webui"
 
 [tasks."dev:server"]
@@ -115,6 +121,7 @@ description = "Create new synthetic .staging run (never writes real S:\\zeogit-r
 alias = "staging"
 
 [tasks."staging:dev"]
-run = 'pwsh -NoProfile -File scripts/create-test-staging.ps1 -TargetRoot .staging/dev-{{arg(name="run-id", default="001")}}'
-description = "Create dev staging run under .staging/dev-<run-id>"
+usage = 'flag "--run-id <run-id>" default="dev-001" help="Staging run id, used as .staging/<run-id>"'
+run = 'pwsh -NoProfile -File scripts/create-test-staging.ps1 -TargetRoot .staging/{{usage.run_id}}'
+description = "Create dev staging run under .staging/<run-id> (default dev-001)"
 alias = "staging:dev"

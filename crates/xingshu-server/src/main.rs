@@ -47,9 +47,10 @@ struct AppState {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
-    let db_path = std::env::var_os("XINGSHU_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("xingshu.db"));
+    let db_path =
+        xingshu_core::config::resolve_db_path(None).map_err(|error| anyhow::anyhow!(error))?;
+    xingshu_core::config::check_db_allowed(&db_path).map_err(|error| anyhow::anyhow!(error))?;
+    let fresh = !db_path.exists();
     let host = std::env::var("XINGSHU_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
     let port = std::env::var("XINGSHU_PORT")
         .ok()
@@ -62,10 +63,16 @@ async fn main() -> Result<()> {
     database
         .mark_active_task_repos_interrupted()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let app = build_router(db_path);
+    let app = build_router(db_path.clone());
     let address: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    tracing::info!(%address, "xingshu server listening");
+    tracing::info!(
+        %address,
+        db = %db_path.display(),
+        env = xingshu_core::config::current_env(),
+        fresh,
+        "xingshu server listening"
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -117,20 +124,13 @@ fn build_router(db_path: PathBuf) -> Router {
 }
 
 fn init_logging() {
-    let filter = std::env::var("XINGSHU_LOG_LEVEL")
-        .or_else(|_| std::env::var("RUST_LOG"))
-        .unwrap_or_else(|_| "info".to_owned());
-    if let Some(path) = std::env::var_os("XINGSHU_LOG_FILE") {
-        let path = std::path::PathBuf::from(path);
-        let max_bytes = std::env::var("XINGSHU_LOG_MAX_BYTES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(10 * 1024 * 1024);
-        let max_files = std::env::var("XINGSHU_LOG_MAX_FILES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(7);
-        match xingshu_core::logging::SizeRollingFile::new(&path, max_bytes, max_files) {
+    let filter = xingshu_core::logging::resolve_log_level();
+    if let Some(rotation) = xingshu_core::logging::resolve_rotation() {
+        match xingshu_core::logging::SizeRollingFile::new(
+            &rotation.path,
+            rotation.max_bytes,
+            rotation.max_files,
+        ) {
             Ok(writer) => {
                 let _ = tracing_subscriber::fmt()
                     .json()

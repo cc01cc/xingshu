@@ -1,5 +1,45 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { Copy, Ellipsis, FolderOpen, Menu, X } from "@lucide/vue";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useTaskStore, type TaskType, type ConflictDetail } from "./task-store";
 
 type Repo = {
@@ -31,6 +71,8 @@ const policyRepoId = ref<number | null>(null);
 const policyForm = ref({ pullStrategy: "fetch-only", conflict: "stop", unattended: "abort" });
 const fetchLogs = ref<Array<{id:number, strategy:string, result:string, startedAt:string}>>([]);
 const moveTarget = ref<number | null>(null);
+const pendingKind = ref<string | null>(null);
+const kindConfirmOpen = ref(false);
 const query = ref("");
 const tagFilter = ref("");
 const view = ref<"repos" | "tags" | "disks" | "settings" | "policy">("repos");
@@ -149,6 +191,10 @@ function formatDuration(value: unknown): string {
   if (n < 60000) return `${(n / 1000).toFixed(1)}s`;
   return `${(n / 60000).toFixed(1)}min`;
 }
+function formatFetchTime(value: string): string {
+  return value.slice(0, 19).replace("T", " ");
+}
+
 function shortBackupPath(value: unknown): string {
   if (!value) return "—";
   const str = String(value);
@@ -276,14 +322,33 @@ async function createTag(): Promise<void> {
 
 async function attachTag(repo: Repo, slug: string): Promise<void> {
   if (!slug || repo.tags.includes(slug)) return;
+  const repoId = repo.id;
   await request(`/api/v1/repos/${repo.id}/tags`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slug }) });
   await load();
-  selected.value = repos.value.find((item) => item.id === repo.id) ?? null;
+  // Guard: drawer may have been closed (or switched repo) while awaiting;
+  // never resurrect a dismissed selection with stale async results.
+  if (selected.value?.id === repoId) selected.value = repos.value.find((item) => item.id === repoId) ?? selected.value;
 }
 
-function selectTag(event: Event, repo: Repo): void {
-  const target = event.target;
-  if (target instanceof HTMLSelectElement) void attachTag(repo, target.value);
+function requestKindChange(value: unknown): void {
+  const next = String(value ?? "");
+  if (!selected.value || !next || next === selected.value.repoKind) return;
+  pendingKind.value = next;
+  kindConfirmOpen.value = true;
+}
+
+async function confirmKindChange(): Promise<void> {
+  kindConfirmOpen.value = false;
+  if (!pendingKind.value) return;
+  const next = pendingKind.value;
+  pendingKind.value = null;
+  await updateKind(next);
+}
+
+function kindChangeHint(kind: string): string {
+  return kind === "third-party" || kind === "third-party-frozen"
+    ? "切换为只读约定类型：出现本地改动会被标为待决策"
+    : "切换为可写类型：将解除只读约定标记，本地改动不再告警";
 }
 
 function filterByTag(slug: string): void {
@@ -310,10 +375,11 @@ async function removeRoot(id: number): Promise<void> {
 
 async function updateKind(kind: string): Promise<void> {
   if (!selected.value) return;
+  const repoId = selected.value.id;
   try {
     await request(`/api/v1/repos/${selected.value.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind }) });
     await load();
-    selected.value = repos.value.find((item) => item.id === selected.value?.id) ?? null;
+    if (selected.value?.id === repoId) selected.value = repos.value.find((item) => item.id === repoId) ?? selected.value;
   } catch (reason) { error.value = friendlyError(reason instanceof Error ? reason.message : "更新类型失败"); }
 }
 
@@ -356,10 +422,11 @@ async function loadFetchLogs(repoId: number): Promise<void> {
 
 async function moveRepo(): Promise<void> {
   if (!selected.value || moveTarget.value === null) return;
+  const repoId = selected.value.id;
   try {
     await request(`/api/v1/repos/${selected.value.id}/move`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetRootId: moveTarget.value }) });
     await load();
-    selected.value = repos.value.find((item) => item.id === selected.value?.id) ?? null;
+    if (selected.value?.id === repoId) selected.value = repos.value.find((item) => item.id === repoId) ?? selected.value;
     error.value = "搬迁成功";
     setTimeout(() => (error.value = ""), 1500);
   } catch (reason) { error.value = friendlyError(reason instanceof Error ? reason.message : "搬迁失败"); }
@@ -418,7 +485,8 @@ watch(() => task.value?.status, (status, previous) => {
 </script>
 
 <template>
-  <div class="shell">
+  <TooltipProvider>
+  <div class="shell style-nova">
     <aside class="sidebar" :class="{open: mobileNavOpen}">
       <div class="brand"><span class="brand-mark">✦</span><span><strong>星枢</strong><small>XINGSHU</small></span></div>
       <nav>
@@ -428,28 +496,28 @@ watch(() => task.value?.status, (status, previous) => {
         <a :class="{ active: view === 'settings' }" href="#" @click.prevent="setView('settings')">设置</a>
         <a :class="{ active: view === 'policy' }" href="#" @click.prevent="setView('policy')">策略</a>
         <a v-if="conflicts.length" class="attention" href="#" @click.prevent="setView('repos')">待决策 <span>{{ conflicts.length }}</span></a>
-         <button class="scan-btn" :disabled="isBusy" @click="void triggerScan()">{{ scanning ? '扫描中…' : '扫描索引' }}</button>
-         <button class="scan-btn" :disabled="isBusy" @click="void triggerPull()">{{ pulling ? '批量 pull 中…' : '批量 pull' }}</button>
+         <Button variant="outline" size="sm" class="mt-3 w-full" :disabled="isBusy" @click="void triggerScan()">{{ scanning ? '扫描中…' : '扫描索引' }}</Button>
+         <Button variant="outline" size="sm" class="mt-2 w-full" :disabled="isBusy" @click="void triggerPull()">{{ pulling ? '批量 pull 中…' : '批量 pull' }}</Button>
       </nav>
       <div class="sidebar-note">本地仓库索引<br /><small>localhost only</small></div>
     </aside>
     <div v-if="mobileNavOpen" class="sidebar-backdrop" @click="closeMobileNav"></div>
     <main class="main">
       <header class="toolbar">
-        <button class="hamburger" aria-label="切换导航" @click="toggleMobileNav">☰</button>
+        <Button variant="ghost" size="icon" class="hamburger" aria-label="切换导航" @click="toggleMobileNav"><Menu class="size-4" /></Button>
         <div><p class="eyebrow">REPOSITORY INDEX</p><h1>{{ view === 'repos' ? '仓库目录' : view === 'tags' ? '主题标签' : view === 'disks' ? '磁盘看板' : view === 'policy' ? '策略' : '设置' }}</h1></div>
-        <input v-if="view === 'repos'" v-model="query" aria-label="搜索仓库" placeholder="搜索仓库、组织或路径…" />
+        <Input v-if="view === 'repos'" v-model="query" aria-label="搜索仓库" placeholder="搜索仓库、组织或路径…" />
         <span v-if="copyFeedback" class="copy-feedback" style="color:#d6aa68;font-size:11px;margin-left:8px;">{{ copyFeedback }}</span>
       </header>
         <section v-if="task" class="task-panel" aria-live="polite">
-          <div class="task-heading"><div><p class="eyebrow">ASYNC TASK</p><strong>{{ task.type === 'scan' ? '索引扫描' : '批量 pull' }}</strong><span class="task-status" :class="task.status">{{ labelStatus(task.status) }}</span></div><button v-if="!isBusy" class="task-dismiss" @click="taskStore.dismiss">关闭</button></div>
+          <div class="task-heading"><div><p class="eyebrow">ASYNC TASK</p><strong>{{ task.type === 'scan' ? '索引扫描' : '批量 pull' }}</strong><Badge variant="outline" class="task-status" :class="task.status">{{ labelStatus(task.status) }}</Badge></div><Button v-if="!isBusy" variant="ghost" size="sm" @click="taskStore.dismiss">关闭</Button></div>
           <div class="task-meta"><span>{{ connectionLabel }}</span><span>{{ taskProgressLabel }}</span><span v-if="task.lastRepo" class="mono" :title="task.lastRepo">{{ task.lastRepo }}</span></div>
           <div class="task-progress" :class="{ indeterminate: isBusy && progressPercent === null }"><span :style="progressPercent === null ? (task?.status === 'completed' ? { width: '100%' } : isBusy ? undefined : { width: '100%', opacity: '0.5' }) : { width: `${progressPercent}%` }" /></div>
           <p v-if="task.lastResult" class="task-result">{{ labelStatus(task.lastResult) }}</p>
           <div v-if="taskConflicts.length" class="task-conflicts">
             <div class="task-conflicts-heading"><strong>待决策仓库</strong><span>{{ taskConflicts.length }} 项</span></div>
             <article v-for="conflict in taskConflicts" :key="conflict.repoId" class="task-conflict">
-              <div><strong>{{ conflict.repoName }}</strong><small class="path">{{ conflict.repoPath }}</small><small v-if="conflict.backupPath" class="path" :title="String(conflict.backupPath)">备份: {{ shortBackupPath(conflict.backupPath) }}<button v-if="conflict.backupPath" class="copy-btn" @click="void openDirectory(String(conflict.backupPath))" title="打开备份所在目录">⌂</button></small></div>
+              <div><strong>{{ conflict.repoName }}</strong><small class="path">{{ conflict.repoPath }}</small><small v-if="conflict.backupPath" class="path" :title="String(conflict.backupPath)">备份: {{ shortBackupPath(conflict.backupPath) }}<Button v-if="conflict.backupPath" variant="ghost" size="icon-sm" class="copy-btn" @click="void openDirectory(String(conflict.backupPath))" title="打开备份所在目录"><FolderOpen class="size-4" /></Button></small></div>
               <template v-if="conflict.conflictDetail">
                 <p><b>{{ conflictHeadline(conflict.conflictDetail) }}</b> — {{ conflict.conflictDetail.reason }}</p>
                 <div v-if="conflict.conflictDetail.kind === 'dirty'" class="conflict-detail">
@@ -472,10 +540,10 @@ watch(() => task.value?.status, (status, previous) => {
               <p v-else>{{ conflict.conflictReason ?? 'Git 操作需要人工决策' }}</p>
               <p class="mono" style="color:#6d7671;font-size:10px">耗时 {{ formatDuration(conflict.durationMs) }} · 状态 {{ labelStatus(conflict.status) }}<span v-if="conflict.requestedAction" style="margin-left:6px">· 已请求: {{ labelResult(conflict.requestedAction) }}</span></p>
               <div class="task-conflict-actions">
-                <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'backup')">备份后拉取</button>
-                <button v-if="overwriteConfirm?.scope === 'task' && overwriteConfirm.repoId === conflict.repoId" :disabled="conflict.status !== 'waiting_decision'" class="confirm-danger" @click="void decideTaskConflict(conflict.repoId, 'overwrite'); cancelOverwrite()">确认覆盖（丢弃本地变更，不可恢复）</button>
-                <button v-else :disabled="conflict.status !== 'waiting_decision'" @click="requestOverwriteConfirm('task', conflict.repoId)">覆盖本地</button>
-                <button :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'abort')">保持现状</button>
+                <Button size="sm" :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'backup')">备份后拉取</Button>
+                <Button v-if="overwriteConfirm?.scope === 'task' && overwriteConfirm.repoId === conflict.repoId" size="sm" variant="destructive" :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'overwrite'); cancelOverwrite()">确认覆盖（丢弃本地变更，不可恢复）</Button>
+                <Button v-else size="sm" variant="outline" :disabled="conflict.status !== 'waiting_decision'" @click="requestOverwriteConfirm('task', conflict.repoId)">覆盖本地</Button>
+                <Button size="sm" variant="ghost" :disabled="conflict.status !== 'waiting_decision'" @click="void decideTaskConflict(conflict.repoId, 'abort')">保持现状</Button>
               </div>
             </article>
           </div>
@@ -487,19 +555,19 @@ watch(() => task.value?.status, (status, previous) => {
                 <span v-for="(count, key) in taskCounts" :key="String(key)" class="count-badge" :class="'count-' + String(key)" :title="String(key)">{{ labelResult(key) }} {{ count }}</span>
               </div>
               <div v-if="taskRepos && taskRepos.length" class="task-repos-wrap">
-                <table class="task-repos-table">
-                  <thead><tr><th>仓库</th><th>状态</th><th>结果</th><th>耗时</th><th>备份</th><th>错误</th></tr></thead>
-                  <tbody>
-                    <tr v-for="repo in taskRepos" :key="String((repo as Record<string, unknown>).repoId ?? (repo as Record<string, unknown>).repo ?? Math.random())">
-                      <td class="mono" :title="String((repo as Record<string, unknown>).repo ?? (repo as Record<string, unknown>).repoId ?? '')">{{ String((repo as Record<string, unknown>).repo ?? (repo as Record<string, unknown>).repoId ?? '—') }}</td>
-                      <td>{{ labelStatus((repo as Record<string, unknown>).status) }}</td>
-                      <td><span class="status" :class="badgeClassForResult((repo as Record<string, unknown>).result)">{{ labelResult((repo as Record<string, unknown>).result) }}</span></td>
-                      <td class="mono">{{ formatDuration((repo as Record<string, unknown>).durationMs) }}</td>
-                      <td class="mono" :title="String((repo as Record<string, unknown>).backupPath ?? '')">{{ shortBackupPath((repo as Record<string, unknown>).backupPath) }}</td>
-                      <td class="mono error-cell" :title="String((repo as Record<string, unknown>).error ?? '')">{{ (repo as Record<string, unknown>).error ? String((repo as Record<string, unknown>).error).slice(0, 80) : '—' }}</td>
-                    </tr>
-                  </tbody>
-                </table>
+                <Table class="task-repos-table">
+                  <TableHeader><TableRow><TableHead>仓库</TableHead><TableHead>状态</TableHead><TableHead>结果</TableHead><TableHead>耗时</TableHead><TableHead>备份</TableHead><TableHead>错误</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    <TableRow v-for="repo in taskRepos" :key="String((repo as Record<string, unknown>).repoId ?? (repo as Record<string, unknown>).repo ?? Math.random())">
+                      <TableCell class="mono" :title="String((repo as Record<string, unknown>).repo ?? (repo as Record<string, unknown>).repoId ?? '')">{{ String((repo as Record<string, unknown>).repo ?? (repo as Record<string, unknown>).repoId ?? '—') }}</TableCell>
+                      <TableCell>{{ labelStatus((repo as Record<string, unknown>).status) }}</TableCell>
+                      <TableCell><Badge variant="outline" :class="['status', badgeClassForResult((repo as Record<string, unknown>).result)]">{{ labelResult((repo as Record<string, unknown>).result) }}</Badge></TableCell>
+                      <TableCell class="mono">{{ formatDuration((repo as Record<string, unknown>).durationMs) }}</TableCell>
+                      <TableCell class="mono" :title="String((repo as Record<string, unknown>).backupPath ?? '')">{{ shortBackupPath((repo as Record<string, unknown>).backupPath) }}</TableCell>
+                      <TableCell class="mono error-cell" :title="String((repo as Record<string, unknown>).error ?? '')">{{ (repo as Record<string, unknown>).error ? String((repo as Record<string, unknown>).error).slice(0, 80) : '—' }}</TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
               </div>
               <div v-else-if="taskScanStats" class="task-scan-stats">
                 <span>已扫描 {{ String((taskScanStats as Record<string, unknown>).roots_scanned ?? (taskScanStats as Record<string, unknown>).rootsScanned ?? '—') }} 根</span>
@@ -516,26 +584,26 @@ watch(() => task.value?.status, (status, previous) => {
        </section>
        <p v-if="error" class="notice error">{{ error }}</p>
       <div v-else-if="loading">
-          <div class="skeleton" style="height:16px;width:40%;margin-top:42px;"></div>
-          <div class="skeleton" style="height:48px;margin-top:12px;"></div>
-          <div class="skeleton" style="height:48px;margin-top:8px;"></div>
-          <div class="skeleton" style="height:48px;margin-top:8px;"></div>
+          <Skeleton style="height:16px;width:40%;margin-top:42px;" />
+          <Skeleton style="height:48px;margin-top:12px;" />
+          <Skeleton style="height:48px;margin-top:8px;" />
+          <Skeleton style="height:48px;margin-top:8px;" />
         </div>
       <template v-else-if="view === 'repos'">
-        <section class="summary"><span><b>{{ filteredRepos.length }}</b> 个结果</span><select v-model="tagFilter" aria-label="按标签过滤"><option value="">全部标签</option><option v-for="tag in tags" :key="tag.id" :value="tag.slug">{{ tag.label }}</option></select><span class="legend"><i class="dot safe" />索引正常 <i class="dot warn" />需要处理</span></section>
+        <section class="summary"><span><b>{{ filteredRepos.length }}</b> 个结果</span><Select :model-value="tagFilter || '__all'" @update:model-value="tagFilter = $event === '__all' ? '' : String($event ?? '')"><SelectTrigger class="w-44" aria-label="按标签过滤"><SelectValue placeholder="全部标签" /></SelectTrigger><SelectContent><SelectItem value="__all">全部标签</SelectItem><SelectItem v-for="tag in tags" :key="tag.id" :value="tag.slug">{{ tag.label }}</SelectItem></SelectContent></Select><span class="legend"><i class="dot safe" />索引正常 <i class="dot warn" />需要处理</span></section>
         <div v-if="filteredRepos.length === 0" class="empty">
           <template v-if="!repos.length && roots.length">暂无仓库索引 · 请到 <a href="#" @click.prevent="setView('settings')">设置</a> 点击「扫描索引」</template>
           <template v-else-if="!repos.length && !roots.length">暂无根目录 · 请到 <a href="#" @click.prevent="setView('settings')">设置</a> 添加根目录后扫描</template>
           <template v-else>没有匹配的仓库</template>
         </div>
-        <div v-else class="table-wrap"><table aria-label="仓库索引列表"><thead><tr><th>仓库</th><th>类型</th><th>标签</th><th>大小</th><th>状态</th><th /></tr></thead><tbody><tr v-for="repo in filteredRepos" :key="repo.id" :class="{selected: selected?.id===repo.id}" @click="selected = repo" tabindex="0" @keydown.enter="selected = repo" @keydown.space.prevent="selected = repo" :aria-selected="selected?.id===repo.id">
-          <td><strong :title="`${repo.org}/${repo.name}`">{{ repo.org }}/{{ repo.name }}</strong><small :title="repo.relPath">{{ repo.relPath }}<button class="copy-btn" @click.stop="copyText(repo.relPath)" title="复制路径">⎘</button></small></td><td><span class="kind" :class="repo.repoKind">{{ repo.repoKind }}</span></td><td><span v-for="slug in repo.tags" :key="slug" class="tag">{{ slug }}</span><span v-if="!repo.tags.length" class="muted">未分类</span></td><td class="mono">{{ formatBytes(repo.sizeBytes) }}</td><td><span v-if="repo.cloneStatus==='broken'" class="status error">异常</span><span v-else-if="repo.lockViolation" class="status warning">本地改动</span><span v-else-if="repo.lastPullStatus==='ahead'" class="status warning" :title="aheadBadgeTitle(repo)">本地领先</span><span v-else-if="repo.lastPullStatus==='ok'" class="status success">正常</span><span v-else class="status">{{ repo.lastPullStatus ?? "未更新" }}</span></td><td><button class="more" @click.stop="selected = repo">···</button></td>
-        </tr></tbody></table></div>
+        <div v-else class="table-wrap"><Table aria-label="仓库索引列表"><TableHeader><TableRow><TableHead>仓库</TableHead><TableHead>类型</TableHead><TableHead>标签</TableHead><TableHead>大小</TableHead><TableHead>状态</TableHead><TableHead /></TableRow></TableHeader><TableBody><TableRow v-for="repo in filteredRepos" :key="repo.id" :class="{selected: selected?.id===repo.id}" @click="selected = repo" tabindex="0" @keydown.enter="selected = repo" @keydown.space.prevent="selected = repo" :aria-selected="selected?.id===repo.id">
+          <TableCell><strong :title="`${repo.org}/${repo.name}`">{{ repo.org }}/{{ repo.name }}</strong><small :title="repo.relPath">{{ repo.relPath }}<Button variant="ghost" size="icon-sm" class="copy-btn" @click.stop="copyText(repo.relPath)" title="复制路径"><Copy class="size-4" /></Button></small></TableCell><TableCell><Badge variant="outline" class="kind" :class="repo.repoKind">{{ repo.repoKind }}</Badge></TableCell><TableCell><Badge v-for="slug in repo.tags" :key="slug" variant="secondary">{{ slug }}</Badge><span v-if="!repo.tags.length" class="muted">未分类</span></TableCell><TableCell class="mono">{{ formatBytes(repo.sizeBytes) }}</TableCell><TableCell><Badge v-if="repo.cloneStatus==='broken'" variant="destructive">异常</Badge><Badge v-else-if="repo.lockViolation" variant="outline" class="status warning">本地改动</Badge><Badge v-else-if="repo.lastPullStatus==='ahead'" variant="outline" class="status warning" :title="aheadBadgeTitle(repo)">本地领先</Badge><Badge v-else-if="repo.lastPullStatus==='ok'" variant="outline" class="status success">正常</Badge><Badge v-else variant="outline">{{ repo.lastPullStatus ?? "未更新" }}</Badge></TableCell><TableCell><Button variant="ghost" size="icon" class="more" @click.stop="selected = repo"><Ellipsis class="size-4" /></Button></TableCell>
+        </TableRow></TableBody></Table></div>
       </template>
-      <section v-else-if="view === 'tags'" class="tag-grid"><form class="tag-create" @submit.prevent="void createTag()"><input v-model="newTag" aria-label="新标签" placeholder="新建主题标签…" /><button type="submit">添加</button></form><div v-for="tag in tags" :key="tag.id" class="tag-card"><button class="tag-delete" @click.stop="deleteTag(tag.id)" aria-label="删除标签">×</button><button class="tag-card-body" @click="filterByTag(tag.slug)"><b>{{ tag.label }}</b><small>{{ repos.filter((repo) => repo.tags.includes(tag.slug)).length }} 个仓库</small></button></div></section>
+      <section v-else-if="view === 'tags'" class="tag-grid"><form class="tag-create" @submit.prevent="void createTag()"><Input v-model="newTag" aria-label="新标签" placeholder="新建主题标签…" /><Button type="submit">添加</Button></form><Card v-for="tag in tags" :key="tag.id" data-size="sm" class="tag-card"><Button variant="ghost" size="icon-sm" class="tag-delete" @click.stop="deleteTag(tag.id)" aria-label="删除标签"><X class="size-4" /></Button><button class="tag-card-body" @click="filterByTag(tag.slug)"><b>{{ tag.label }}</b><small>{{ repos.filter((repo) => repo.tags.includes(tag.slug)).length }} 个仓库</small></button></Card></section>
       <template v-else-if="view === 'disks'">
-        <section class="dashboard"><div class="stat-card"><small>索引仓库</small><strong>{{ stats.repositories }}</strong></div><div class="stat-card"><small>已占用空间</small><strong>{{ formatBytes(stats.bytes) }}</strong></div><div class="stat-card"><small>待决策</small><strong class="accent">{{ conflicts.length }}</strong></div></section>
-        <div v-if="Object.keys(stats.byKind).length" class="kind-bar"><div v-for="(count, kind) in stats.byKind" :key="kind" class="kind-segment" :style="{ flex: count }"><span class="kind" :class="kind">{{ kind }}</span> {{ count }}</div></div>
+        <section class="dashboard"><Card class="stat-card"><small>索引仓库</small><strong>{{ stats.repositories }}</strong></Card><Card class="stat-card"><small>已占用空间</small><strong>{{ formatBytes(stats.bytes) }}</strong></Card><Card class="stat-card"><small>待决策</small><strong class="accent">{{ conflicts.length }}</strong></Card></section>
+        <div v-if="Object.keys(stats.byKind).length" class="kind-bar"><div v-for="(count, kind) in stats.byKind" :key="kind" class="kind-segment" :style="{ flex: count }"><Badge variant="outline" class="kind" :class="kind">{{ kind }}</Badge> {{ count }}</div></div>
         <div v-if="roots.length" style="margin-top:16px;display:grid;gap:8px;">
           <div v-for="root in roots" :key="root.id" class="root-item">
             <div><strong>{{ root.name }}</strong><small>{{ root.path }}</small></div>
@@ -546,10 +614,10 @@ watch(() => task.value?.status, (status, previous) => {
       <template v-else-if="view === 'settings'">
         <h2 class="settings-title">根目录管理</h2>
         <p class="settings-hint">添加本地 Git 仓库的父目录（可多个、跨盘），添加后需手动触发扫描才会生成索引。</p>
-        <form class="root-create" @submit.prevent="addRoot"><input v-model="newRootPath" aria-label="根目录路径" placeholder="输入根目录绝对路径…" /><button type="submit">添加</button></form>
-        <div class="root-list"><div v-for="root in roots" :key="root.id" class="root-item"><div><strong>{{ root.name }}</strong><small>{{ root.path }}</small><span v-if="root.diskLabel" class="tag">{{ root.diskLabel }}</span></div><button @click="removeRoot(root.id)">移除</button></div><div v-if="!roots.length" class="empty">暂无根目录 · 示例：S:\zeogit-ref</div></div>
+        <form class="root-create" @submit.prevent="addRoot"><Input v-model="newRootPath" aria-label="根目录路径" placeholder="输入根目录绝对路径…" /><Button type="submit">添加</Button></form>
+        <div class="root-list"><div v-for="root in roots" :key="root.id" class="root-item"><div><strong>{{ root.name }}</strong><small>{{ root.path }}</small><Badge v-if="root.diskLabel" variant="secondary">{{ root.diskLabel }}</Badge></div><Button variant="ghost" size="sm" @click="removeRoot(root.id)">移除</Button></div><div v-if="!roots.length" class="empty">暂无根目录 · 示例：S:\zeogit-ref</div></div>
         <div class="settings-actions">
-          <button class="settings-scan-btn" :disabled="isBusy || !roots.length" @click="void triggerScan()">{{ scanning ? '扫描中…' : `扫描索引（${roots.length} 个根目录）` }}</button>
+          <Button :disabled="isBusy || !roots.length" @click="void triggerScan()">{{ scanning ? '扫描中…' : `扫描索引（${roots.length} 个根目录）` }}</Button>
           <span class="muted">{{ roots.length ? (repos.length ? `已索引 ${repos.length} 个仓库` : '尚未扫描，点击扫描后仓库将出现在「仓库」页') : '先添加根目录' }}</span>
         </div>
         <p v-if="roots.length && !repos.length && !task" class="notice">提示：根目录已就绪，请点击上方「扫描索引」执行首次索引。Z:\TEST 这类空目录不会产生仓库。</p>
@@ -560,26 +628,29 @@ watch(() => task.value?.status, (status, previous) => {
         <h2 class="settings-title">策略管理</h2>
         <p class="settings-hint">按仓库配置拉取策略与冲突处理，空值回退为 kind 默认。</p>
         <div class="root-create">
-          <select v-model="policyRepoId" aria-label="选择仓库">
-            <option :value="null">选择仓库…</option>
-            <option v-for="repo in repos" :key="repo.id" :value="repo.id">{{ repo.org }}/{{ repo.name }}</option>
-          </select>
-          <button @click="policyRepoId!==null && loadPolicy(policyRepoId)">加载</button>
+          <Select :model-value="policyRepoId === null ? '' : String(policyRepoId)" @update:model-value="policyRepoId = $event === '' ? null : Number($event)">
+            <SelectTrigger class="w-64" aria-label="选择仓库"><SelectValue placeholder="选择仓库…" /></SelectTrigger>
+            <SelectContent><SelectItem v-for="repo in repos" :key="repo.id" :value="String(repo.id)">{{ repo.org }}/{{ repo.name }}</SelectItem></SelectContent>
+          </Select>
+          <Button variant="outline" size="sm" @click="policyRepoId!==null && loadPolicy(policyRepoId)">加载</Button>
         </div>
         <div v-if="policyRepoId!==null" class="policy-form" style="display:grid;gap:8px;max-width:480px;">
-          <label>拉取策略 <select v-model="policyForm.pullStrategy"><option value="fetch-only">fetch-only</option><option value="mirror">mirror</option><option value="no-update">no-update</option><option value="archive">archive</option></select></label>
-          <label>冲突策略 <select v-model="policyForm.conflict"><option value="stop">stop</option><option value="backup">backup</option><option value="overwrite">overwrite</option><option value="abort">abort</option></select></label>
-          <label>无人值守 <select v-model="policyForm.unattended"><option value="stop">stop</option><option value="backup">backup</option><option value="overwrite">overwrite</option><option value="abort">abort</option></select></label>
-          <button class="settings-scan-btn" @click="savePolicy">保存策略</button>
+          <div class="policy-field"><Label>拉取策略</Label><Select v-model="policyForm.pullStrategy"><SelectTrigger class="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="fetch-only">fetch-only</SelectItem><SelectItem value="mirror">mirror</SelectItem><SelectItem value="no-update">no-update</SelectItem><SelectItem value="archive">archive</SelectItem></SelectContent></Select></div>
+          <div class="policy-field"><Label>冲突策略</Label><Select v-model="policyForm.conflict"><SelectTrigger class="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="stop">stop</SelectItem><SelectItem value="backup">backup</SelectItem><SelectItem value="overwrite">overwrite</SelectItem><SelectItem value="abort">abort</SelectItem></SelectContent></Select></div>
+          <div class="policy-field"><Label>无人值守</Label><Select v-model="policyForm.unattended"><SelectTrigger class="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="stop">stop</SelectItem><SelectItem value="backup">backup</SelectItem><SelectItem value="overwrite">overwrite</SelectItem><SelectItem value="abort">abort</SelectItem></SelectContent></Select></div>
+          <Button @click="savePolicy">保存策略</Button>
         </div>
       </template>
     </main>
-    <div v-if="selected" class="drawer-backdrop" @click="selected=null"></div>
-    <aside v-if="selected" class="drawer"><button class="close" aria-label="关闭详情" @click="selected = null">×</button><p class="eyebrow">REPOSITORY DETAIL</p><h2>{{ selected.org }}/{{ selected.name }}</h2><small class="path" :title="selected.relPath">{{ selected.relPath }}<button class="copy-btn" @click="copyText(selected.relPath)" title="复制路径">⎘</button></small><dl><dt>类型</dt><dd><select class="kind-select" :value="selected.repoKind" @change="updateKind(($event.target as HTMLSelectElement).value)"><option value="third-party">third-party</option><option value="third-party-frozen">third-party-frozen</option><option value="fork">fork</option><option value="own">own</option></select><span v-if="selected.modifyLock" class="muted"> · 星枢修改锁</span></dd><dt>分支</dt><dd>{{ selected.defaultBranch ?? 'bare / unknown' }}</dd><dt>HEAD</dt><dd class="mono" :title="selected.headCommit ?? ''">{{ selected.headCommit?.slice(0, 10) ?? '—' }}<button v-if="selected.headCommit" class="copy-btn" @click="copyText(selected.headCommit!)" title="复制 HEAD">⎘</button></dd><dt>远程</dt><dd class="path" :title="selected.remoteUrl ?? ''">{{ selected.remoteUrl ?? '—' }}<button v-if="selected.remoteUrl" class="copy-btn" @click="copyText(selected.remoteUrl!)" title="复制远程">⎘</button></dd><dt>大小</dt><dd>{{ formatBytes(selected.sizeBytes) }}</dd><dt>标签</dt><dd><span v-for="slug in selected.tags" :key="slug" class="tag">{{ slug }}</span><span v-if="!selected.tags.length" class="muted">无</span></dd></dl><div style="margin-top:16px;display:flex;gap:6px;align-items:center;">
-          <select v-model="moveTarget" aria-label="目标根" style="flex:1;min-width:0;"><option :value="null">移动至…</option><option v-for="root in roots" :key="root.id" :value="root.id" :disabled="root.id===selected.rootId">{{ root.name }} ({{ root.path }})</option></select>
-          <button class="move-btn" @click="moveRepo" :disabled="moveTarget===null">搬迁</button>
+    <Sheet :open="selected !== null" @update:open="(value: boolean) => { if (!value) selected = null; }">
+    <SheetContent v-if="selected" class="drawer" :show-close-button="false"><Button variant="ghost" size="icon" class="close" aria-label="关闭详情" @click="selected = null"><X class="size-4" /></Button><SheetHeader class="drawer-head"><p class="eyebrow">REPOSITORY DETAIL</p><SheetTitle class="drawer-title">{{ selected.org }}/{{ selected.name }}</SheetTitle><SheetDescription class="sr-only">仓库详情与操作</SheetDescription></SheetHeader><small class="path" :title="selected.relPath">{{ selected.relPath }}<Button variant="ghost" size="icon-sm" class="copy-btn" @click="copyText(selected.relPath)" title="复制路径"><Copy class="size-4" /></Button></small><dl><dt>类型</dt><dd><Select :model-value="selected.repoKind" @update:model-value="requestKindChange($event)"><SelectTrigger class="w-44" aria-label="仓库类型"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="third-party">third-party</SelectItem><SelectItem value="third-party-frozen">third-party-frozen</SelectItem><SelectItem value="fork">fork</SelectItem><SelectItem value="own">own</SelectItem></SelectContent></Select><AlertDialog v-model:open="kindConfirmOpen"><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>切换仓库类型？</AlertDialogTitle><AlertDialogDescription>{{ pendingKind ? kindChangeHint(pendingKind) : '' }}该操作立即写入索引。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction @click="void confirmKindChange()">确认切换</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog><span v-if="selected.modifyLock" class="muted"> · 只读约定<Tooltip><TooltipTrigger as-child><span class="lock-hint" tabindex="0" aria-label="只读约定说明"> ?</span></TooltipTrigger><TooltipContent class="max-w-60">third-party 约定只读：出现本地改动会被标为待决策，pull 时需人工确认；不阻止你在文件管理器里直接修改。</TooltipContent></Tooltip></span></dd><dt>分支</dt><dd>{{ selected.defaultBranch ?? 'bare / unknown' }}</dd><dt>HEAD</dt><dd class="mono" :title="selected.headCommit ?? ''">{{ selected.headCommit?.slice(0, 10) ?? '—' }}<Button v-if="selected.headCommit" variant="ghost" size="icon-sm" class="copy-btn" @click="copyText(selected.headCommit!)" title="复制 HEAD"><Copy class="size-4" /></Button></dd><dt>远程</dt><dd class="path" :title="selected.remoteUrl ?? ''">{{ selected.remoteUrl ?? '—' }}<Button v-if="selected.remoteUrl" variant="ghost" size="icon-sm" class="copy-btn" @click="copyText(selected.remoteUrl!)" title="复制远程"><Copy class="size-4" /></Button></dd><dt>大小</dt><dd>{{ formatBytes(selected.sizeBytes) }}</dd><dt>标签</dt><dd><Badge v-for="slug in selected.tags" :key="slug" variant="secondary">{{ slug }}</Badge><span v-if="!selected.tags.length" class="muted">无</span></dd></dl><div style="margin-top:16px;display:flex;gap:6px;align-items:center;">
+          <Select :model-value="moveTarget === null ? undefined : String(moveTarget)" @update:model-value="moveTarget = $event == null || $event === '' ? null : Number($event)"><SelectTrigger class="min-w-0 flex-1" aria-label="目标根"><SelectValue placeholder="移动至…" /></SelectTrigger><SelectContent><SelectItem v-for="root in roots" :key="root.id" :value="String(root.id)" :disabled="root.id===selected.rootId">{{ root.name }} ({{ root.path }})</SelectItem></SelectContent></Select>
+          <Button size="sm" @click="moveRepo" :disabled="moveTarget===null">搬迁</Button>
         </div>
-        <details style="margin-top:12px;"><summary @click="selected && loadFetchLogs(selected.id)">拉取历史</summary><div v-if="fetchLogs.length"><div v-for="log in fetchLogs" :key="log.id" class="mono" style="font-size:11px;">{{ log.startedAt.slice(0,19) }} {{ log.strategy }} {{ labelResult(log.result) }}</div></div><div v-else class="muted">暂无历史</div></details>
-        <div class="drawer-actions"><button @click="void pull(selected)">pull</button><button v-if="repoAbsolutePath(selected)" @click="void openDirectory(repoAbsolutePath(selected)!)" title="在文件管理器中打开仓库目录">打开目录</button><select aria-label="添加标签" @change="selectTag($event, selected)"><option value="">添加标签…</option><option v-for="tag in tags" :key="tag.id" :value="tag.slug">{{ tag.label }}</option></select></div><div v-if="selected.lockViolation" class="conflict"><b>检测到本地改动</b><p>当前仓库被标记为锁定类型。选择处理方式：</p><ul class="conflict-outcome-list"><li><b>备份后拉取</b>：整仓快照至 .bak.<时间戳> 后重新克隆，本地变更随备份保留</li><li><b>覆盖本地</b>：丢弃全部变更（含未跟踪文件），不可恢复</li><li><b>保持现状</b>：不做任何操作</li></ul><button :disabled="!!resolvingAction" @click="void resolveConflict('backup')">{{ resolvingAction==='backup' ? '处理中…' : '备份后拉取' }}</button><button v-if="overwriteConfirm?.scope === 'drawer'" :disabled="!!resolvingAction" class="confirm-danger" @click="void resolveConflict('overwrite'); cancelOverwrite()">确认覆盖（丢弃本地变更，不可恢复）</button><button v-else :disabled="!!resolvingAction" @click="overwriteConfirm = { scope: 'drawer', repoId: selected.id }">{{ resolvingAction==='overwrite' ? '处理中…' : '覆盖本地' }}</button><button :disabled="!!resolvingAction" @click="void resolveConflict('abort')">{{ resolvingAction==='abort' ? '处理中…' : '保持现状' }}</button><p v-if="resolvingAction" class="muted" style="margin-top:8px">正在执行 {{ labelResult(resolvingAction) }}，大仓库可能耗时数秒…</p></div></aside>
+        <details class="fetch-log"><summary @click="selected && loadFetchLogs(selected.id)">拉取历史</summary><div v-if="fetchLogs.length" class="fetch-log-list"><div v-for="log in fetchLogs" :key="log.id" class="fetch-log-row"><span class="mono">{{ formatFetchTime(log.startedAt) }}</span><span class="mono">{{ log.strategy }}</span><Badge variant="outline">{{ labelResult(log.result) }}</Badge></div></div><div v-else class="muted">暂无历史</div></details>
+        <div class="drawer-actions"><Button size="sm" @click="void pull(selected)">pull</Button><Button v-if="repoAbsolutePath(selected)" size="sm" variant="outline" @click="void openDirectory(repoAbsolutePath(selected)!)" title="在文件管理器中打开仓库目录">打开目录</Button><Select @update:model-value="void attachTag(selected, String($event ?? ''))"><SelectTrigger aria-label="添加标签"><SelectValue placeholder="添加标签…" /></SelectTrigger><SelectContent><SelectItem v-for="tag in tags" :key="tag.id" :value="tag.slug">{{ tag.label }}</SelectItem></SelectContent></Select></div><div v-if="selected.lockViolation" class="conflict"><b>检测到本地改动</b><p>当前仓库被标记为锁定类型。选择处理方式：</p><ul class="conflict-outcome-list"><li><b>备份后拉取</b>：整仓快照至 .bak.<时间戳> 后重新克隆，本地变更随备份保留</li><li><b>覆盖本地</b>：丢弃全部变更（含未跟踪文件），不可恢复</li><li><b>保持现状</b>：不做任何操作</li></ul><Button :disabled="!!resolvingAction" @click="void resolveConflict('backup')">{{ resolvingAction==='backup' ? '处理中…' : '备份后拉取' }}</Button><Button v-if="overwriteConfirm?.scope === 'drawer'" variant="destructive" :disabled="!!resolvingAction" @click="void resolveConflict('overwrite'); cancelOverwrite()">确认覆盖（丢弃本地变更，不可恢复）</Button><Button v-else variant="outline" :disabled="!!resolvingAction" @click="overwriteConfirm = { scope: 'drawer', repoId: selected.id }">{{ resolvingAction==='overwrite' ? '处理中…' : '覆盖本地' }}</Button><Button variant="ghost" :disabled="!!resolvingAction" @click="void resolveConflict('abort')">{{ resolvingAction==='abort' ? '处理中…' : '保持现状' }}</Button><p v-if="resolvingAction" class="muted" style="margin-top:8px">正在执行 {{ labelResult(resolvingAction) }}，大仓库可能耗时数秒…</p></div>
+    </SheetContent>
+    </Sheet>
   </div>
+  </TooltipProvider>
 </template>

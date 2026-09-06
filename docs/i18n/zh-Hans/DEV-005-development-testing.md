@@ -5,23 +5,27 @@
 ```powershell
 mise run setup
 mise run staging:dev --run-id dev-001
-$env:XINGSHU_DB = ".staging/dev-001/xingshu.db"
-mise run dev          # == dev:host → 12681 server + 12680 Vite 并行，Ctrl+C 同停
+mise run dev          # == dev:host → 12681 server + 12680 Vite 并行，Ctrl+C 同停；缺省进 .staging/dev-001/xingshu-dev.db
+# 换 run：$env:XINGSHU_DB = ".staging/dev-002/xingshu-dev.db"; mise run dev
+# 生产库：mise run prod:server  # XINGSHU_ENV=prod，默认 ./xingshu-prod.db，拒 .staging/ 路径
 ```
+
+数据库文件名统一规范 `xingshu-<env>.db`。本地遗留根 `xingshu.db`（2026-09-06 改名前的数据）手动改名 `xingshu-prod.db` 一次即可。
 
 等价裸命令（双终端）：
 
 ```powershell
 pwsh -NoProfile -File .\scripts\create-test-staging.ps1 -TargetRoot .\.staging\dev-<run-id>
-$env:XINGSHU_DB = ".staging\dev-<run-id>\xingshu.db"
+# 缺省即进 .\.staging\dev-<run-id>\xingshu-dev.db，无需设变量；换 run 才设：
+$env:XINGSHU_DB = ".staging\dev-<run-id>\xingshu-dev.db"
 
 # 终端 1：Rust API
 $env:XINGSHU_PORT = "12681"
 cargo run -p xingshu-server
 
-# 终端 2：Vite WebUI
+# 终端 2：Vite WebUI（host/port 以 webui/vite.config.ts 为准：127.0.0.1:12680）
 cd webui
-pnpm --ignore-workspace run dev -- --host 127.0.0.1
+pnpm --ignore-workspace run dev
 ```
 
 Vite 使用 `12680`，并将 `/api` 与 `/health` 代理至 `12681`；server 在构建完成后也可直接托管 `webui/dist`。在设置页添加根目录后，点击 **扫描索引** 再查看仓库列表。

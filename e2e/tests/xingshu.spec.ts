@@ -39,7 +39,8 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     // tag filter (initially 全部标签)
     const tagSelect = page.getByLabel("按标签过滤");
     await expect(tagSelect).toBeVisible();
-    await tagSelect.selectOption({ index: 0 }); // 全部标签
+    await tagSelect.click();
+    await page.getByRole("option", { name: "全部标签" }).click();
     await expect(page.locator("table tbody tr")).toHaveCount(6);
   });
 
@@ -60,8 +61,9 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     await expect(page.locator("table tbody tr")).toHaveCount(6);
     await page.locator("table tbody tr").first().click();
     await expect(page.locator(".drawer")).toBeVisible();
-    const attachSelect = page.locator(".drawer").getByLabel("添加标签");
-    await attachSelect.selectOption(slug);
+    const attachTrigger = page.locator(".drawer").getByLabel("添加标签");
+    await attachTrigger.click();
+    await page.getByRole("option", { name: slug }).click();
     // drawer should reflect tag
     await expect(page.locator(".drawer")).toContainText(slug);
     await page.locator(".drawer .close").click();
@@ -74,7 +76,8 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     await expect(page.getByRole("heading", { name: "仓库目录" })).toBeVisible();
     await expect(page.locator("table tbody tr")).toHaveCount(1);
     // clear filter
-    await page.getByLabel("按标签过滤").selectOption("");
+    await page.getByLabel("按标签过滤").click();
+    await page.getByRole("option", { name: "全部标签" }).click();
 
     // delete tag
     await page.getByRole("link", { name: /标签/ }).click();
@@ -130,11 +133,11 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     await page.locator(".root-create button", { hasText: "添加" }).click();
     await expect(page.locator(".root-item", { hasText: secondRoot.path })).toBeVisible({ timeout: 8000 });
     // need to re-scan to restore repos
-    const scanBtn = page.locator(".settings-scan-btn");
+    const scanBtn = page.locator(".settings-actions").getByRole("button", { name: /扫描索引/ });
     await scanBtn.click();
     // wait for task panel to complete
     await expect(page.locator(".task-panel")).toBeVisible({ timeout: 5000 });
-    await expect(page.locator(".task-panel")).toContainText(/已完成|completed/, { timeout: 15000 });
+    await expect(page.locator(".task-panel")).toContainText(/已完成|completed/, { timeout: 60000 }); // NOTE: loaded machines scan ~3s/repo
   });
 
   test("抽屉详情：类型切换与远程信息", async ({ page }) => {
@@ -144,37 +147,42 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     const ownRow = page.locator("table tbody tr", { hasText: "own-demo" });
     await ownRow.click();
     await expect(page.locator(".drawer")).toBeVisible();
-    await expect(page.locator(".drawer h2")).toContainText("own-demo");
+    await expect(page.locator(".drawer-title")).toContainText("own-demo");
     await expect(page.locator(".drawer")).toContainText("https://github.com/cc01cc/own-demo.git");
-    // kind select should exist and be changeable
-    const kindSelect = page.locator(".drawer .kind-select");
-    await expect(kindSelect).toBeVisible();
-    const initialKind = await kindSelect.inputValue();
-    // change to fork then back to own to verify PUT works
-    await kindSelect.selectOption("fork");
+    // kind trigger should exist and be changeable (with confirm dialog)
+    const kindTrigger = page.locator(".drawer").getByLabel("仓库类型");
+    await expect(kindTrigger).toBeVisible();
+    const initialKind = ((await kindTrigger.textContent()) ?? "").trim();
+    // change to fork then back to verify PUT works (each change needs dialog confirm)
+    await kindTrigger.click();
+    await page.getByRole("option", { name: "fork", exact: true }).click();
+    await expect(page.getByRole("alertdialog")).toBeVisible();
+    await page.getByRole("button", { name: "确认切换" }).click();
     await expect(page.locator(".drawer")).toContainText("fork");
     // reload to ensure persisted
     await page.reload();
     await expect(page.locator("table tbody tr")).toHaveCount(6, { timeout: 8000 });
     await ownRow.click();
-    await expect(page.locator(".drawer .kind-select")).toHaveValue("fork", { timeout: 5000 });
-    await page.locator(".drawer .kind-select").selectOption(initialKind);
-    await expect(page.locator(".drawer .kind-select")).toHaveValue(initialKind);
+    await expect(page.locator(".drawer").getByLabel("仓库类型")).toContainText("fork", { timeout: 5000 });
+    await page.locator(".drawer").getByLabel("仓库类型").click();
+    await page.getByRole("option", { name: initialKind, exact: true }).click();
+    await page.getByRole("button", { name: "确认切换" }).click();
+    await expect(page.locator(".drawer").getByLabel("仓库类型")).toContainText(initialKind);
     await page.locator(".drawer .close").click();
   });
 
   test("异步任务：扫描索引任务流与结果渲染", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("link", { name: "设置" }).click();
-    await expect(page.locator(".settings-scan-btn")).toBeVisible();
+    await expect(page.locator(".settings-actions").getByRole("button", { name: /扫描索引/ })).toBeVisible();
     // trigger scan via settings button (also sidebar has scan)
-    await page.locator(".settings-scan-btn").click();
+    await page.locator(".settings-actions").getByRole("button", { name: /扫描索引/ }).click();
     // task panel appears
     await expect(page.locator(".task-panel")).toBeVisible({ timeout: 5000 });
     await expect(page.locator(".task-panel")).toContainText("索引扫描");
     await expect(page.locator(".task-progress")).toBeVisible();
     // wait for completed
-    await expect(page.locator(".task-panel")).toContainText(/已完成/, { timeout: 20000 });
+    await expect(page.locator(".task-panel")).toContainText(/已完成/, { timeout: 60000 }); // NOTE: see above
     await expect(page.locator(".task-panel")).toContainText(/共 \d+ 个仓库|roots_scanned|发现/);
     // result table or scan stats should be visible
     await expect(page.locator(".task-details")).toBeVisible();
@@ -182,12 +190,13 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     await expect(page.locator(".task-scan-stats")).toContainText(/已扫描.*根/);
     await expect(page.locator(".task-scan-stats")).toContainText(/发现.*仓/);
     // dismiss task
-    await page.locator(".task-dismiss").click();
+    await page.locator(".task-panel").getByRole("button", { name: "关闭" }).click();
     await expect(page.locator(".task-panel")).toHaveCount(0);
     await page.screenshot({ path: `../.playwright-cli/${Date.now()}-scan-result.png`, fullPage: false });
   });
 
   test("异步任务：批量 pull 冲突决策流（dirty-demo 需决策）", async ({ page }) => {
+    test.slow(); // sandbox pull latency (TLS retries on fake github remotes) can exceed the 45s default
     await page.goto("/");
     // ensure dirty-demo exists and has lockViolation
     await expect(page.locator("table tbody tr", { hasText: "dirty-demo" })).toBeVisible({ timeout: 8000 });
@@ -202,7 +211,9 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     await expect(page.locator(".task-panel")).toContainText("批量 pull");
 
     // wait for waiting_for_decision (dirty-demo, diverged-demo, third-party-demo)
-    await expect(page.locator(".task-conflicts")).toBeVisible({ timeout: 25000 });
+    // NOTE: sandbox has no github access; fork/own-demo pulls burn TLS-retry seconds
+    // before conflicts surface, so this window is generous (upstream CI is fast).
+    await expect(page.locator(".task-conflicts")).toBeVisible({ timeout: 90000 });
     // synthetic staging: dirty-demo + diverged-demo hit conflicts (sync repos pull cleanly)
     await expect(page.locator(".task-conflict")).toHaveCount(2, { timeout: 15000 });
     const dirtyCard = page.locator(".task-conflict", { hasText: "dirty-demo" });
@@ -233,7 +244,7 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     await expect(page.locator(".task-repos-table th", { hasText: "备份" })).toBeVisible();
     await page.screenshot({ path: `../.playwright-cli/${Date.now()}-pull-conflict.png`, fullPage: false });
     // dismiss
-    await page.locator(".task-dismiss").click().catch(() => {});
+    await page.locator(".task-panel").getByRole("button", { name: "关闭" }).click().catch(() => {});
   });
 
   test("API 边界：无效标签与请求 ID 透传", async ({ page }) => {
@@ -281,11 +292,12 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     // overwrite 需二次确认
     const drawer = page.locator(".drawer .conflict");
     await drawer.locator("button", { hasText: "覆盖本地" }).click();
-    await expect(page.locator(".drawer button.confirm-danger")).toBeVisible();
+    await expect(page.locator(".drawer").getByRole("button", { name: /确认覆盖/ })).toBeVisible();
     await page.locator(".drawer .close").click();
   });
 
   test("冲突面板：diverged 双栏与 ≡ 等价标记（批量 pull 决策流）", async ({ page }) => {
+    test.slow(); // same sandbox pull latency as above
     await page.goto("/");
     await expect(page.locator("table tbody tr", { hasText: "diverged-demo" })).toBeVisible({ timeout: 8000 });
     // 触发批量 pull（ask 模式），diverged-demo 会进入等待决策；若上一用例任务未终态导致 409 则重试
@@ -295,9 +307,10 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
       await expect(page.locator(".notice.error")).toHaveCount(0, { timeout: 2000 }).catch(() => {
         throw new Error("start rejected; retrying");
       });
-    }).toPass({ timeout: 30000 });
+    }).toPass({ timeout: 120000 });
     await expect(page.locator(".task-panel")).toBeVisible({ timeout: 10000 });
-    await expect(page.locator(".task-conflicts")).toBeVisible({ timeout: 30000 });
+    // NOTE: same sandbox-network generosity as above.
+    await expect(page.locator(".task-conflicts")).toBeVisible({ timeout: 90000 });
     const conflictCard = page.locator(".task-conflict", { hasText: "diverged-demo" });
     await expect(conflictCard).toBeVisible({ timeout: 15000 });
     // 结构化面板：标题 + 双栏 + 分叉点
@@ -323,7 +336,7 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     }).toPass({ timeout: 30000 });
     await expect(page.locator(".task-status")).toHaveClass(/completed|failed/, { timeout: 20000 });
     await expect(page.locator(".task-repos-table")).toContainText(/已中止|aborted/, { timeout: 10000 });
-    await page.locator(".task-dismiss").click().catch(() => {});
+    await page.locator(".task-panel").getByRole("button", { name: "关闭" }).click().catch(() => {});
   });
 
   test("打开目录 API：合法路径与越界拒绝", async ({ page }) => {

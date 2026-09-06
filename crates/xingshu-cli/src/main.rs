@@ -17,8 +17,8 @@ use xingshu_core::types::{Policy as RepoPolicy, RepoKind, RepoRecord, Root, Scan
     about = "Local Git repository index and workspace manager"
 )]
 struct Cli {
-    #[arg(long, default_value = "xingshu.db", global = true)]
-    db: PathBuf,
+    #[arg(long, env = "XINGSHU_DB", global = true)]
+    db: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -140,7 +140,9 @@ struct MoveArgs {
 fn main() -> Result<()> {
     init_logging();
     let cli = Cli::parse();
-    let database = Database::open(&cli.db).map_err(|error| anyhow!(error.to_string()))?;
+    let db_path = xingshu_core::config::resolve_db_path(cli.db).map_err(|error| anyhow!(error))?;
+    xingshu_core::config::check_db_allowed(&db_path).map_err(|error| anyhow!(error))?;
+    let database = Database::open(&db_path).map_err(|error| anyhow!(error.to_string()))?;
     match cli.command {
         Command::Roots { command } => roots(&database, command),
         Command::Scan(args) => scan(&database, args),
@@ -156,20 +158,13 @@ fn main() -> Result<()> {
 }
 
 fn init_logging() {
-    let filter = std::env::var("XINGSHU_LOG_LEVEL")
-        .or_else(|_| std::env::var("RUST_LOG"))
-        .unwrap_or_else(|_| "info".to_owned());
-    if let Some(path) = std::env::var_os("XINGSHU_LOG_FILE") {
-        let path = std::path::PathBuf::from(path);
-        let max_bytes = std::env::var("XINGSHU_LOG_MAX_BYTES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(10 * 1024 * 1024);
-        let max_files = std::env::var("XINGSHU_LOG_MAX_FILES")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(7);
-        match xingshu_core::logging::SizeRollingFile::new(&path, max_bytes, max_files) {
+    let filter = xingshu_core::logging::resolve_log_level();
+    if let Some(rotation) = xingshu_core::logging::resolve_rotation() {
+        match xingshu_core::logging::SizeRollingFile::new(
+            &rotation.path,
+            rotation.max_bytes,
+            rotation.max_files,
+        ) {
             Ok(writer) => {
                 let _ = tracing_subscriber::fmt()
                     .json()

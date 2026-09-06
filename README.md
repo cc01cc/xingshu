@@ -13,15 +13,15 @@
 ```powershell
 cargo build --workspace --release
 pwsh -NoProfile -File .\scripts\create-test-staging.ps1 -TargetRoot .\.staging\run-001
-.\target\release\xingshu.exe --db .\.staging\run-001\xingshu.db roots add .\.staging\run-001\root-a
-.\target\release\xingshu.exe --db .\.staging\run-001\xingshu.db roots add .\.staging\run-001\root-b
-.\target\release\xingshu.exe --db .\.staging\run-001\xingshu.db scan --my-org cc01cc
+.\target\release\xingshu.exe --db .\.staging\run-001\xingshu-dev.db roots add .\.staging\run-001\root-a
+.\target\release\xingshu.exe --db .\.staging\run-001\xingshu-dev.db roots add .\.staging\run-001\root-b
+.\target\release\xingshu.exe --db .\.staging\run-001\xingshu-dev.db scan --my-org cc01cc
 ```
 
 启动本地 API 与构建后的 WebUI：
 
 ```powershell
-$env:XINGSHU_DB = ".staging\run-001\xingshu.db"
+$env:XINGSHU_DB = ".staging\run-001\xingshu-dev.db"
 $env:XINGSHU_PORT = "12681"
 .\target\release\xingshu-server.exe
 ```
@@ -84,7 +84,8 @@ mise run setup
 
 # 2. Create a fresh staging run (synthetic, never writes real S:\zeogit-ref)
 mise run staging:dev --run-id dev-001
-$env:XINGSHU_DB = ".staging/dev-001/xingshu.db"
+# (default DB is now .staging/dev-001/xingshu-dev.db; set $env:XINGSHU_DB only to switch runs)
+# Prod DB: mise run prod:server (XINGSHU_ENV=prod, ./xingshu-prod.db)
 
 # 3. Start server (12681) + Vite (12680, proxies /api to 12681) in parallel
 mise run dev          # == mise run dev:host, Ctrl+C cleans up both

@@ -1,0 +1,148 @@
+/*
+ * shadcn-vue theme tokens (neutral base, dark-only, XS-adapted).
+ * Source of defaults: unovue/shadcn-vue registry theme "neutral" (cssVars).
+ * Dark palette mapped to XS existing colors (style.css): background #111315,
+ * card #191c1b, primary gold #d6aa68. Light :root block is unused at runtime
+ * (index.html pins class="dark") but kept for shadcn convention.
+ * Inter @font-face lands in M2 (task 2.1); --font-sans falls back until then.
+ */
+
+/* Inter variable (latin), vendored offline-first (OFL-1.1, see assets/fonts/). */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./assets/fonts/inter-latin-wght-normal.woff2") format("woff2");
+}
+
+/* Custom utility expected by nova style blocks (shadcn CLI base style). */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+:root {
+  --radius: 0.375rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: #111315;
+  --foreground: #e6e8e6;
+  --card: #191c1b;
+  --card-foreground: #e6e8e6;
+  --popover: #1e2220;
+  --popover-foreground: #e6e8e6;
+  --primary: #d6aa68;
+  --primary-foreground: #1a1409;
+  --secondary: #202422;
+  --secondary-foreground: #e6e8e6;
+  --muted: #202422;
+  --muted-foreground: #aab2ad;
+  --accent: #2d261b;
+  --accent-foreground: #d6aa68;
+  --destructive: #e89a9a;
+  --destructive-foreground: #221818;
+  --border: #353a37;
+  --input: #353a37;
+  --ring: #9a7848;
+  --chart-1: #d6aa68;
+  --chart-2: #9db5a3;
+  --chart-3: #8c9490;
+  --chart-4: #69716e;
+  --chart-5: #4e5552;
+  --sidebar: #141615;
+  --sidebar-foreground: #89908e;
+  --sidebar-primary: #d6aa68;
+  --sidebar-primary-foreground: #111315;
+  --sidebar-accent: #202422;
+  --sidebar-accent-foreground: #e6e8e6;
+  --sidebar-border: #292d2c;
+  --sidebar-ring: #9a7848;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+
+  @keyframes accordion-down {
+    from { height: 0; }
+    to { height: var(--reka-accordion-content-height); }
+  }
+  @keyframes accordion-up {
+    from { height: var(--reka-accordion-content-height); }
+    to { height: 0; }
+  }
+}

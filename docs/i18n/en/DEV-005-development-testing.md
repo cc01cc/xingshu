@@ -5,23 +5,27 @@
 ```powershell
 mise run setup
 mise run staging:dev --run-id dev-001
-$env:XINGSHU_DB = ".staging/dev-001/xingshu.db"
-mise run dev          # == dev:host → 12681 server + 12680 Vite in parallel, Ctrl+C stops both
+mise run dev          # == dev:host → 12681 server + 12680 Vite in parallel, Ctrl+C stops both; defaults to .staging/dev-001/xingshu-dev.db
+# Switch runs: $env:XINGSHU_DB = ".staging/dev-002/xingshu-dev.db"; mise run dev
+# Prod DB: mise run prod:server  # XINGSHU_ENV=prod, defaults to ./xingshu-prod.db, refuses .staging/ paths
 ```
+
+Database files follow `xingshu-<env>.db`. Rename a legacy root `xingshu.db` (data from before 2026-09-06) to `xingshu-prod.db` once.
 
 Raw equivalent (two terminals):
 
 ```powershell
 pwsh -NoProfile -File .\scripts\create-test-staging.ps1 -TargetRoot .\.staging\dev-<run-id>
-$env:XINGSHU_DB = ".staging\dev-<run-id>\xingshu.db"
+# The default already points at .\.staging\dev-<run-id>\xingshu-dev.db; set the variable only to switch runs:
+$env:XINGSHU_DB = ".staging\dev-<run-id>\xingshu-dev.db"
 
 # Terminal 1
 $env:XINGSHU_PORT = "12681"
 cargo run -p xingshu-server
 
-# Terminal 2
+# Terminal 2 (host/port come from webui/vite.config.ts: 127.0.0.1:12680)
 cd webui
-pnpm --ignore-workspace run dev -- --host 127.0.0.1
+pnpm --ignore-workspace run dev
 ```
 
 Vite uses `12680` and proxies `/api` and `/health` to `12681`; the built bundle is served by Axum on `12681` after `pnpm run build`. After adding roots in Settings, click **Scan** to populate the repository table.

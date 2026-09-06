@@ -4,7 +4,8 @@ Prefer `mise run dev` (`mise.toml`, mirrors A03-xihe): runs Axum on `12681` and 
 
 ## Pages
 
-- Repositories: search, tag filter, kind/lock status, detail drawer; empty states link to Settings for the scan CTA (`No index yet — scan in Settings`).
+- Repositories: search, tag filter, kind/lock status, detail drawer; empty states link to Settings for the scan CTA (`No index yet — scan in Settings`). Switching the kind dropdown in the drawer asks for confirmation and explains the read-only convention flip; a hover tooltip next to the read-only marker explains it (third-party means read-only by convention: local changes become decision items, pull needs a human decision).
+- Fetch history: inside the detail drawer, one row per entry with `YYYY-MM-DD HH:mm:ss`, strategy, and a result badge.
 - Tags: create domain labels and jump to filtered lists.
 - Disk dashboard: indexed count, bytes, and decision backlog.
 - Settings: root management (absolute path → Add, multiple roots across disks), hint `Scanning is required after adding roots`, primary CTA `Scan (N roots)` with `Indexed N / Not yet scanned` copy; scanning an empty dir such as `Z:\TEST` yielding 0 is expected.
