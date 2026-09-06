@@ -7,7 +7,7 @@ use chrono::Utc;
 use crate::git::{self, GitCommandOutput};
 use crate::policy::{PullConflictAction, ResolvedPolicy, is_update_enabled};
 use crate::progress::ProgressReporter;
-use crate::types::{FetchLog, RepoRecord, VcsError};
+use crate::types::{ConflictInfo, FetchLog, RepoRecord, VcsError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullMode {
@@ -19,6 +19,7 @@ pub enum PullMode {
 pub struct PullOutcome {
     pub result: String,
     pub backup_path: Option<PathBuf>,
+    pub conflict: Option<ConflictInfo>,
     pub output: Option<GitCommandOutput>,
 }
 
@@ -53,37 +54,71 @@ pub fn pull_repo_with_reporter(
             return Ok(PullOutcome {
                 result: "skipped".to_owned(),
                 backup_path: None,
+                conflict: None,
                 output: None,
             });
         }
 
         let metadata = git::inspect(path)?;
-        let dirty = metadata.dirty || metadata.ahead_of_upstream;
-        let pull_result = if dirty {
-            Err(VcsError::ConflictNeedsDecision)
-        } else {
-            git::run_git(path, &["pull", "--ff-only"])
+        if metadata.dirty {
+            // 工作区有未提交变更：直接进冲突决策，携带 status 明细
+            let info = dirty_conflict_info(&metadata);
+            return resolve_pull_conflict_with_info(path, repo, policy, mode, Some(info));
+        }
+        // 工作区干净：先 fetch 比对 refs，区分 ahead_clean / ff / diverged·non-ff
+        let fetch_result = git::run_git(path, &["fetch", "origin", "--prune"]);
+        let divergence = match fetch_result {
+            Ok(_) => git::divergence(path),
+            Err(error) => {
+                // 离线：回退旧判定——ahead 视为冲突（信息可能过期），干净则直接 pull
+                tracing::warn!(error = %error, "fetch failed; falling back to offline heuristic");
+                if metadata.ahead_of_upstream {
+                    return resolve_pull_conflict_with_info(path, repo, policy, mode, None);
+                }
+                None
+            }
         };
-
+        match divergence {
+            Some(info) if info.behind == 0 && info.ahead > 0 => {
+                // ahead_clean：本地领先且上游无新提交；ff-only pull 为 no-op 成功
+                // 不阻塞流程，结果记 ahead（UI 徽标数据源）
+                tracing::info!(
+                    ahead = info.ahead,
+                    "pull skipped: local is ahead of upstream (possible upstream rollback)"
+                );
+                return Ok(PullOutcome {
+                    result: "ahead".to_owned(),
+                    backup_path: None,
+                    conflict: Some(info),
+                    output: None,
+                });
+            }
+            Some(info) if info.ahead == 0 && info.behind == 0 => {
+                // 与上游同步：正常 ff pull（no-op 成功）
+                let output = git::run_git(path, &["pull", "--ff-only"])?;
+                return Ok(PullOutcome {
+                    result: "ok".to_owned(),
+                    backup_path: None,
+                    conflict: None,
+                    output: Some(output),
+                });
+            }
+            Some(info) => {
+                // diverged / non-ff：进冲突决策，携带双栏清单
+                return resolve_pull_conflict_with_info(path, repo, policy, mode, Some(info));
+            }
+            None => {}
+        }
+        let pull_result = git::run_git(path, &["pull", "--ff-only"]);
         match pull_result {
             Ok(output) => Ok(PullOutcome {
                 result: "ok".to_owned(),
                 backup_path: None,
+                conflict: None,
                 output: Some(output),
             }),
-            Err(VcsError::ConflictNeedsDecision) => {
-                let action = match mode {
-                    PullMode::Interactive => policy.conflict_action,
-                    PullMode::Unattended => policy.unattended_action,
-                };
-                resolve_pull_conflict(path, repo, action)
-            }
             Err(VcsError::GitCommand(message)) if is_conflict_message(&message) => {
-                let action = match mode {
-                    PullMode::Interactive => policy.conflict_action,
-                    PullMode::Unattended => policy.unattended_action,
-                };
-                resolve_pull_conflict(path, repo, action)
+                resolve_pull_conflict_with_info(path, repo, policy, mode, None)
             }
             Err(error) => Err(error),
         }
@@ -151,16 +186,56 @@ pub fn make_fetch_log(repo_id: i64, strategy: &str, outcome: &PullOutcome) -> Fe
     }
 }
 
+fn dirty_conflict_info(metadata: &git::GitMetadata) -> ConflictInfo {
+    ConflictInfo {
+        kind: crate::types::ConflictKind::Dirty,
+        reason: format!(
+            "working tree has local changes: {} staged, {} modified, {} untracked",
+            metadata.staged, metadata.modified, metadata.untracked
+        ),
+        ahead: metadata.ahead,
+        behind: metadata.behind,
+        merge_base: None,
+        merge_base_date: None,
+        local_only: Vec::new(),
+        upstream_only: Vec::new(),
+        equivalent: Vec::new(),
+        status_entries: metadata.status_entries.clone(),
+        staged: metadata.staged,
+        modified: metadata.modified,
+        untracked: metadata.untracked,
+    }
+}
+
 pub fn resolve_pull_conflict(
     path: &Path,
     repo: &RepoRecord,
     action: PullConflictAction,
 ) -> Result<PullOutcome, VcsError> {
+    resolve_pull_conflict_with_info(path, repo, &ResolvedPolicy {
+        pull_strategy: "fetch-only".to_owned(),
+        conflict_action: action,
+        unattended_action: action,
+    }, PullMode::Interactive, None)
+}
+
+fn resolve_pull_conflict_with_info(
+    path: &Path,
+    repo: &RepoRecord,
+    policy: &ResolvedPolicy,
+    mode: PullMode,
+    info: Option<ConflictInfo>,
+) -> Result<PullOutcome, VcsError> {
+    let action = match mode {
+        PullMode::Interactive => policy.conflict_action,
+        PullMode::Unattended => policy.unattended_action,
+    };
     match action {
-        PullConflictAction::Stop => Err(VcsError::ConflictNeedsDecision),
+        PullConflictAction::Stop => Err(VcsError::ConflictNeedsDecision(info.map(Box::new))),
         PullConflictAction::Abort => Ok(PullOutcome {
             result: "aborted".to_owned(),
             backup_path: None,
+            conflict: info,
             output: None,
         }),
         PullConflictAction::Backup => {
@@ -182,6 +257,7 @@ pub fn resolve_pull_conflict(
                     Ok(PullOutcome {
                         result: "ok".to_owned(),
                         backup_path: Some(backup),
+                        conflict: info,
                         output: None,
                     })
                 }
@@ -195,6 +271,7 @@ pub fn resolve_pull_conflict(
             Ok(PullOutcome {
                 result: "ok".to_owned(),
                 backup_path: None,
+                conflict: info,
                 output: Some(output),
             })
         }

@@ -12,5 +12,5 @@ pub mod vcs;
 pub use db::Database;
 pub use progress::ProgressReporter;
 pub use scanner::{ScanReport, scan_roots};
-pub use types::{RepoKind, RepoRecord, Root, ScanOptions, VcsError};
+pub use types::{ConflictInfo, ConflictKind, RepoKind, RepoRecord, Root, ScanOptions, VcsError};
 pub use vcs::{GitBackend, Vcs};

@@ -206,7 +206,7 @@ fn dirty_repository_requires_interactive_decision_and_aborts_unattended() {
 
     let error =
         pull_repo(&repo_path, &repo, &policy, PullMode::Interactive).expect_err("must stop");
-    assert!(matches!(error, VcsError::ConflictNeedsDecision));
+    assert!(matches!(error, VcsError::ConflictNeedsDecision(_)));
     let outcome = pull_repo(&repo_path, &repo, &policy, PullMode::Unattended).expect("must abort");
     assert_eq!(outcome.result, "aborted");
 }

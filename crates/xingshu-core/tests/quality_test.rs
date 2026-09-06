@@ -200,6 +200,7 @@ fn task_repo_restart_recovery_preserves_waiting_decisions_and_interrupts_resolvi
             &TaskRepoUpdate {
                 status: "waiting_decision".to_owned(),
                 conflict_reason: Some("dirty".to_owned()),
+                conflict: None,
                 requested_action: None,
                 result: Some("conflict".to_owned()),
                 duration_ms: Some(10),

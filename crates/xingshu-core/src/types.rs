@@ -144,6 +144,7 @@ pub struct TaskEvent {
     pub repo_id: Option<i64>,
     pub repo_status: Option<String>,
     pub conflict_reason: Option<String>,
+    pub conflict: Option<ConflictInfo>,
     pub requested_action: Option<String>,
     pub backup_path: Option<String>,
     pub current: Option<u64>,
@@ -172,6 +173,7 @@ pub struct TaskRepoRecord {
     pub repo_id: i64,
     pub status: String,
     pub conflict_reason: Option<String>,
+    pub conflict_json: Option<String>,
     pub requested_action: Option<String>,
     pub result: Option<String>,
     pub duration_ms: Option<u64>,
@@ -185,6 +187,7 @@ pub struct TaskRepoRecord {
 pub struct TaskRepoUpdate {
     pub status: String,
     pub conflict_reason: Option<String>,
+    pub conflict: Option<ConflictInfo>,
     pub requested_action: Option<String>,
     pub result: Option<String>,
     pub duration_ms: Option<u64>,
@@ -223,6 +226,49 @@ impl Default for ScanOptions {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictKind {
+    Dirty,
+    Diverged,
+    NonFf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitBrief {
+    pub short: String,
+    pub summary: String,
+    pub author: String,
+    pub date: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusEntry {
+    pub index: String,
+    pub worktree: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictInfo {
+    pub kind: ConflictKind,
+    pub reason: String,
+    pub ahead: u32,
+    pub behind: u32,
+    pub merge_base: Option<String>,
+    pub merge_base_date: Option<String>,
+    pub local_only: Vec<CommitBrief>,
+    pub upstream_only: Vec<CommitBrief>,
+    pub equivalent: Vec<(String, String)>,
+    pub status_entries: Vec<StatusEntry>,
+    pub staged: u32,
+    pub modified: u32,
+    pub untracked: u32,
+}
+
 #[derive(Debug, Error)]
 pub enum VcsError {
     #[error("invalid repository kind: {0}")]
@@ -232,7 +278,7 @@ pub enum VcsError {
     #[error("push to protected remote is denied by Xingshu policy")]
     ProtectedRemote,
     #[error("repository conflict requires a user decision")]
-    ConflictNeedsDecision,
+    ConflictNeedsDecision(Option<Box<ConflictInfo>>),
     #[error("repository path is outside the configured root")]
     PathOutsideRoot,
     #[error("git command failed: {0}")]

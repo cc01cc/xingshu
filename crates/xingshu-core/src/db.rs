@@ -35,6 +35,12 @@ impl Database {
                 "conflict_mode",
                 "TEXT NOT NULL DEFAULT 'policy'",
             )?;
+            ensure_column(
+                connection,
+                "task_repos",
+                "conflict_json",
+                "TEXT",
+            )?;
             let now = Utc::now().to_rfc3339();
             connection
                 .execute(
@@ -663,7 +669,7 @@ impl Database {
             let mut statement = connection
                 .prepare(
                     "SELECT id, task_id, repo_id, status, conflict_reason, requested_action,
-                        result, duration_ms, backup_path, error, created_at, updated_at
+                        result, duration_ms, backup_path, error, created_at, updated_at, conflict_json
                      FROM task_repos WHERE task_id = ?1 ORDER BY id",
                 )
                 .map_err(|error| VcsError::Database(error.to_string()))?;
@@ -684,7 +690,7 @@ impl Database {
             connection
                 .query_row(
                     "SELECT id, task_id, repo_id, status, conflict_reason, requested_action,
-                        result, duration_ms, backup_path, error, created_at, updated_at
+                        result, duration_ms, backup_path, error, created_at, updated_at, conflict_json
                      FROM task_repos WHERE task_id = ?1 AND repo_id = ?2",
                     params![task_id, repo_id],
                     row_to_task_repo,
@@ -727,13 +733,19 @@ impl Database {
         repo_id: i64,
         update: &TaskRepoUpdate,
     ) -> Result<(), VcsError> {
+        let conflict_json = update
+            .conflict
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| VcsError::Database(error.to_string()))?;
         self.with_connection(|connection| {
             connection
                 .execute(
                     "UPDATE task_repos SET status = ?1, conflict_reason = ?2,
                         requested_action = ?3, result = ?4, duration_ms = ?5,
-                        backup_path = ?6, error = ?7, updated_at = ?8
-                     WHERE task_id = ?9 AND repo_id = ?10",
+                        backup_path = ?6, error = ?7, conflict_json = ?9, updated_at = ?8
+                     WHERE task_id = ?10 AND repo_id = ?11",
                     params![
                         update.status,
                         update.conflict_reason,
@@ -743,6 +755,7 @@ impl Database {
                         update.backup_path,
                         update.error,
                         Utc::now().to_rfc3339(),
+                        conflict_json,
                         task_id,
                         repo_id,
                     ],
@@ -1029,5 +1042,6 @@ fn row_to_task_repo(row: &rusqlite::Row<'_>) -> Result<TaskRepoRecord, rusqlite:
         error: row.get(9)?,
         created_at: parse_time(row.get(10)?)?,
         updated_at: parse_time(row.get(11)?)?,
+        conflict_json: row.get(12)?,
     })
 }

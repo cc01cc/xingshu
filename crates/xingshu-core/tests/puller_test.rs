@@ -165,6 +165,133 @@ fn bare_repository_is_skipped_by_batch_pull() {
 }
 
 #[test]
+fn dirty_conflict_carries_status_entries() {
+    let temp = TempDir::new().expect("temp");
+    let (remote, _) = seed_remote(&temp);
+    let root = temp.path().join("root");
+    let repo_path = root.join("network/demo");
+    fs::create_dir_all(repo_path.parent().expect("parent")).expect("parent");
+    Command::new("git")
+        .args(["clone", "-q", remote.to_string_lossy().as_ref(), repo_path.to_string_lossy().as_ref()])
+        .output()
+        .expect("clone");
+    fs::write(repo_path.join("README.md"), "changed\n").expect("tracked");
+    fs::write(repo_path.join("untracked.txt"), "new\n").expect("untracked");
+    let database = Database::open(temp.path().join("index.db")).expect("db");
+    let repo = scanned_repo(&database, &root, &repo_path);
+    let outcome = pull_repo(
+        &repo_path,
+        &repo,
+        &policy(PullConflictAction::Abort),
+        PullMode::Unattended,
+    )
+    .expect("abort");
+    assert_eq!(outcome.result, "aborted");
+    let info = outcome.conflict.expect("conflict info");
+    assert_eq!(info.kind, xingshu_core::ConflictKind::Dirty);
+    assert_eq!(info.untracked, 1);
+    assert_eq!(info.modified, 1);
+    assert!(info.status_entries.iter().any(|entry| entry.path.contains("untracked.txt")));
+    assert!(repo_path.join("untracked.txt").exists());
+}
+
+#[test]
+fn upstream_rollback_ahead_clean_is_not_a_conflict() {
+    let temp = TempDir::new().expect("temp");
+    let (remote, seed) = seed_remote(&temp);
+    let root = temp.path().join("root");
+    let repo_path = root.join("network/demo");
+    fs::create_dir_all(repo_path.parent().expect("parent")).expect("parent");
+    Command::new("git")
+        .args(["clone", "-q", remote.to_string_lossy().as_ref(), repo_path.to_string_lossy().as_ref()])
+        .output()
+        .expect("clone");
+    git(&seed, &["config", "user.email", "test@example.invalid"]);
+    git(&seed, &["config", "user.name", "Xingshu Test"]);
+    fs::write(seed.join("upstream.txt"), "upstream\n").expect("file");
+    git(&seed, &["add", "upstream.txt"]);
+    git(&seed, &["commit", "-q", "-m", "upstream commit"]);
+    git(&seed, &["push", "-q"]);
+    git(&repo_path, &["pull", "-q", "--ff-only"]);
+    fs::write(repo_path.join("local.txt"), "local ahead\n").expect("file");
+    git(&repo_path, &["config", "user.email", "test@example.invalid"]);
+    git(&repo_path, &["config", "user.name", "Xingshu Test"]);
+    git(&repo_path, &["add", "local.txt"]);
+    git(&repo_path, &["commit", "-q", "-m", "local ahead commit"]);
+    // 上游 force-push 回退（丢弃 upstream commit），本地保持 ahead 2 干净
+    git(&seed, &["reset", "-q", "--hard", "HEAD~1"]);
+    git(&seed, &["push", "-q", "--force"]);
+    let database = Database::open(temp.path().join("index.db")).expect("db");
+    let repo = scanned_repo(&database, &root, &repo_path);
+    let outcome = pull_repo(
+        &repo_path,
+        &repo,
+        &policy(PullConflictAction::Abort),
+        PullMode::Unattended,
+    )
+    .expect("ahead pull should not conflict");
+    assert_eq!(outcome.result, "ahead");
+    let info = outcome.conflict.expect("ahead info");
+    assert_eq!(info.ahead, 2);
+    assert_eq!(info.behind, 0);
+    assert!(repo_path.join("local.txt").exists());
+}
+
+#[test]
+fn diverged_conflict_carries_dual_columns_and_equivalent() {
+    let temp = TempDir::new().expect("temp");
+    let (remote, seed) = seed_remote(&temp);
+    let root = temp.path().join("root");
+    let repo_path = root.join("network/demo");
+    fs::create_dir_all(repo_path.parent().expect("parent")).expect("parent");
+    Command::new("git")
+        .args(["clone", "-q", remote.to_string_lossy().as_ref(), repo_path.to_string_lossy().as_ref()])
+        .output()
+        .expect("clone");
+    // 本地领先 1：内容与上游重做提交相同（模拟回退重做）
+    // 前置：上游先加 A2 commit 并本地同步，保证 reset HEAD~1 有父可回退
+    git(&seed, &["config", "user.email", "test@example.invalid"]);
+    git(&seed, &["config", "user.name", "Xingshu Test"]);
+    fs::write(seed.join("upstream.txt"), "upstream\n").expect("file");
+    git(&seed, &["add", "upstream.txt"]);
+    git(&seed, &["commit", "-q", "-m", "upstream commit"]);
+    git(&seed, &["push", "-q"]);
+    git(&repo_path, &["pull", "-q", "--ff-only"]);
+    fs::write(repo_path.join("feature.txt"), "same content\n").expect("file");
+    git(&repo_path, &["config", "user.email", "test@example.invalid"]);
+    git(&repo_path, &["config", "user.name", "Xingshu Test"]);
+    git(&repo_path, &["add", "feature.txt"]);
+    git(&repo_path, &["commit", "-q", "-m", "add feature line"]);
+    // 上游 force-push 重走：回退 seed 提交后提交相同内容（hash 不同）
+    git(&seed, &["config", "user.email", "test@example.invalid"]);
+    git(&seed, &["config", "user.name", "Xingshu Test"]);
+    git(&seed, &["reset", "-q", "--hard", "HEAD~1"]);
+    fs::write(seed.join("feature.txt"), "same content\n").expect("file");
+    git(&seed, &["add", "feature.txt"]);
+    git(&seed, &["commit", "-q", "-m", "reapply feature (upstream redo)"]);
+    git(&seed, &["push", "-q", "--force"]);
+    let database = Database::open(temp.path().join("index.db")).expect("db");
+    let repo = scanned_repo(&database, &root, &repo_path);
+    let outcome = pull_repo(
+        &repo_path,
+        &repo,
+        &policy(PullConflictAction::Abort),
+        PullMode::Unattended,
+    )
+    .expect("diverged");
+    assert_eq!(outcome.result, "aborted");
+    let info = outcome.conflict.expect("diverged info");
+    // 本地领先 2（A2 upstream commit + B feature commit，因上游回退了 A2），
+    // 上游领先 1（C redo commit）
+    assert_eq!(info.ahead, 2);
+    assert_eq!(info.behind, 1);
+    assert_eq!(info.local_only.len(), 2);
+    assert_eq!(info.upstream_only.len(), 1);
+    assert!(info.merge_base.is_some());
+    assert_eq!(info.equivalent.len(), 1, "expected patch-equivalent pair");
+}
+
+#[test]
 fn non_conflict_git_failure_is_not_reported_as_user_conflict() {
     let temp = TempDir::new().expect("temp");
     let root = temp.path().join("root");
