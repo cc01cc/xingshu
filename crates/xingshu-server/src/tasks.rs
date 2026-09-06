@@ -7,7 +7,7 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use xingshu_core::types::{
-    TaskEvent, TaskRecord, TaskRepoRecord, TaskRepoUpdate, TaskUpdate, VcsError,
+    ConflictInfo, TaskEvent, TaskRecord, TaskRepoRecord, TaskRepoUpdate, TaskUpdate, VcsError,
 };
 use xingshu_core::{Database, ProgressReporter};
 
@@ -31,6 +31,7 @@ struct TaskEventDetails {
     repo_id: Option<i64>,
     repo_status: Option<String>,
     conflict_reason: Option<String>,
+    conflict: Option<ConflictInfo>,
     requested_action: Option<String>,
     backup_path: Option<String>,
 }
@@ -437,6 +438,7 @@ impl TaskManager {
             repo_id: details.repo_id,
             repo_status: details.repo_status,
             conflict_reason: details.conflict_reason,
+            conflict: details.conflict,
             requested_action: details.requested_action,
             backup_path: details.backup_path,
             current: change.current,
@@ -471,6 +473,10 @@ impl TaskManager {
             repo_id: Some(record.repo_id),
             repo_status: Some(record.status.clone()),
             conflict_reason: record.conflict_reason.clone(),
+            conflict: record
+                .conflict_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok()),
             requested_action: record.requested_action.clone(),
             backup_path: record.backup_path.clone(),
             current: None,

@@ -102,6 +102,7 @@ fn build_router(db_path: PathBuf) -> Router {
         .route("/api/v1/stats", get(stats))
         .route("/api/v1/repos/{repo_id}/fetch_log", get(fetch_logs))
         .route("/api/v1/repos/{repo_id}/move", post(move_repo_handler))
+        .route("/api/v1/open", post(open_path))
         .route(
             "/api/v1/repos/{repo_id}/policy",
             get(get_repo_policy).put(set_repo_policy),
@@ -539,6 +540,7 @@ struct TaskConflictResponse {
     repo_path: String,
     status: String,
     conflict_reason: Option<String>,
+    conflict: Option<xingshu_core::types::ConflictInfo>,
     allowed_actions: Vec<&'static str>,
     requested_action: Option<String>,
     result: Option<String>,
@@ -578,6 +580,10 @@ async fn task_conflicts(State(state): State<AppState>, Path(task_id): Path<Strin
                     repo_path: repo.rel_path.to_string_lossy().to_string(),
                     status: record.status,
                     conflict_reason: record.conflict_reason,
+                    conflict: record
+                        .conflict_json
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str(json).ok()),
                     allowed_actions: vec!["backup", "overwrite", "abort"],
                     requested_action: record.requested_action,
                     result: record.result,
@@ -666,6 +672,7 @@ async fn task_repo_decision(
             let update = TaskRepoUpdate {
                 status: "failed".to_owned(),
                 conflict_reason: record.conflict_reason.clone(),
+                conflict: None,
                 requested_action: Some(worker_action_name.clone()),
                 result: Some("failed".to_owned()),
                 duration_ms: None,
@@ -738,6 +745,10 @@ fn resolve_task_repo_decision(
             let update = TaskRepoUpdate {
                 status: status.to_owned(),
                 conflict_reason: task_repo.conflict_reason,
+                conflict: task_repo
+                    .conflict_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok()),
                 requested_action: task_repo.requested_action,
                 result: Some(outcome.result),
                 duration_ms: Some(duration_ms),
@@ -747,9 +758,14 @@ fn resolve_task_repo_decision(
             manager.save_task_repo(task_id, repo_id, &update, "decision_applied")?;
         }
         Err(error) => {
+            let conflict = match &error {
+                VcsError::ConflictNeedsDecision(info) => info.as_deref().cloned(),
+                _ => None,
+            };
             let update = TaskRepoUpdate {
                 status: "failed".to_owned(),
                 conflict_reason: task_repo.conflict_reason,
+                conflict,
                 requested_action: task_repo.requested_action,
                 result: Some("failed".to_owned()),
                 duration_ms: Some(duration_ms),
@@ -866,6 +882,7 @@ struct RepoPullResult {
     status: String,
     result: String,
     conflict_reason: Option<String>,
+    conflict: Option<xingshu_core::types::ConflictInfo>,
     duration_ms: Option<u64>,
     backup_path: Option<String>,
     error: Option<String>,
@@ -957,6 +974,7 @@ fn run_task(
                                             },
                                             result: outcome.result,
                                             conflict_reason: None,
+                                            conflict: outcome.conflict,
                                             duration_ms: Some(started.elapsed().as_millis() as u64),
                                             backup_path: outcome
                                                 .backup_path
@@ -965,14 +983,24 @@ fn run_task(
                                         })
                                     }
                                     Err(error)
-                                        if matches!(error, VcsError::ConflictNeedsDecision) =>
+                                        if matches!(
+                                            error,
+                                            VcsError::ConflictNeedsDecision(_)
+                                        ) =>
                                     {
+                                        let conflict = match &error {
+                                            VcsError::ConflictNeedsDecision(info) => {
+                                                info.as_deref().cloned()
+                                            }
+                                            _ => None,
+                                        };
                                         Ok(RepoPullResult {
                                             repo_id,
                                             repo_name: format!("{}/{}", repo.org, repo.name),
                                             status: "waiting_decision".to_owned(),
                                             result: "conflict".to_owned(),
                                             conflict_reason: Some(error.to_string()),
+                                            conflict,
                                             duration_ms: Some(started.elapsed().as_millis() as u64),
                                             backup_path: None,
                                             error: None,
@@ -984,6 +1012,7 @@ fn run_task(
                                         status: "failed".to_owned(),
                                         result: "failed".to_owned(),
                                         conflict_reason: None,
+                                        conflict: None,
                                         duration_ms: Some(started.elapsed().as_millis() as u64),
                                         backup_path: None,
                                         error: Some(error.to_string()),
@@ -996,6 +1025,7 @@ fn run_task(
                                 status: "failed".to_owned(),
                                 result: "failed".to_owned(),
                                 conflict_reason: None,
+                                conflict: None,
                                 duration_ms: Some(started.elapsed().as_millis() as u64),
                                 backup_path: None,
                                 error: Some(error.to_string()),
@@ -1022,6 +1052,7 @@ fn run_task(
                         &TaskRepoUpdate {
                             status: result.status.clone(),
                             conflict_reason: result.conflict_reason.clone(),
+                            conflict: result.conflict.clone(),
                             requested_action: None,
                             result: Some(result.result.clone()),
                             duration_ms: result.duration_ms,
@@ -1491,6 +1522,57 @@ fn problem_response(status: StatusCode, code: &str, message: &str) -> Response {
         response.headers_mut().insert("x-request-id", value);
     }
     response
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenPathRequest {
+    path: String,
+}
+
+async fn open_path(State(state): State<AppState>, Json(request): Json<OpenPathRequest>) -> Response {
+    let requested = std::path::PathBuf::from(&request.path);
+    let Ok(canonical) = requested.canonicalize() else {
+        return problem_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_path",
+            "path does not exist",
+        );
+    };
+    // 白名单：目标必须位于至少一个已注册 root 之下（canonical prefix match）
+    let database = match Database::open(&state.db_path) {
+        Ok(database) => database,
+        Err(error) => return error_response(error.to_string()),
+    };
+    let roots = match database.list_roots() {
+        Ok(roots) => roots,
+        Err(error) => return error_response(error.to_string()),
+    };
+    let allowed = roots.iter().any(|root| {
+        root.path
+            .canonicalize()
+            .map(|root_path| canonical.starts_with(&root_path))
+            .unwrap_or(false)
+    });
+    if !allowed {
+        return problem_response(
+            StatusCode::BAD_REQUEST,
+            "path_outside_root",
+            "path is outside the configured roots",
+        );
+    }
+    // `Command::arg` 原始传参（不经 shell），Windows 用 explorer 打开文件夹
+    #[cfg(target_os = "windows")]
+    let spawn_result = std::process::Command::new("explorer.exe")
+        .arg(&canonical)
+        .spawn();
+    #[cfg(not(target_os = "windows"))]
+    let spawn_result = std::process::Command::new("xdg-open")
+        .arg(&canonical)
+        .spawn();
+    match spawn_result {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error_response(format!("failed to open path: {error}")),
+    }
 }
 
 #[cfg(test)]
