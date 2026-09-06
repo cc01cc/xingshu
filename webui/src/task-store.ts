@@ -21,6 +21,22 @@ export type Task = {
   updatedAt: string;
 };
 
+export type ConflictDetail = {
+  kind: "dirty" | "diverged" | "nonFf";
+  reason: string;
+  ahead: number;
+  behind: number;
+  mergeBase: string | null;
+  mergeBaseDate: string | null;
+  localOnly: Array<{ short: string; summary: string; author: string; date: string }>;
+  upstreamOnly: Array<{ short: string; summary: string; author: string; date: string }>;
+  equivalent: Array<[string, string]>;
+  statusEntries: Array<{ index: string; worktree: string; path: string }>;
+  staged: number;
+  modified: number;
+  untracked: number;
+};
+
 export type TaskConflict = {
   taskId: string;
   repoId: number;
@@ -28,6 +44,7 @@ export type TaskConflict = {
   repoPath: string;
   status: "waiting_decision" | "resolving" | "failed" | "interrupted";
   conflictReason: string | null;
+  conflictDetail: ConflictDetail | null;
   allowedActions: Array<"backup" | "overwrite" | "abort">;
   requestedAction: "backup" | "overwrite" | "abort" | null;
   result: string | null;
@@ -41,6 +58,7 @@ type TaskEvent = {
   repoId?: number | null;
   repoStatus?: string | null;
   conflictReason?: string | null;
+  conflict?: ConflictDetail | null;
   requestedAction?: string | null;
   backupPath?: string | null;
   event?: string;
@@ -51,6 +69,49 @@ type TaskEvent = {
   error?: string | null;
   durationMs?: number | null;
 };
+
+function parseConflictDetail(value: unknown): ConflictDetail | null {
+  if (!isRecord(value)) return null;
+  const kind = value.kind;
+  if (kind !== "dirty" && kind !== "diverged" && kind !== "nonFf") return null;
+  const briefs = (input: unknown) =>
+    Array.isArray(input)
+      ? input.filter(isRecord).map((item) => ({
+          short: String(item.short ?? ""),
+          summary: String(item.summary ?? ""),
+          author: String(item.author ?? ""),
+          date: String(item.date ?? ""),
+        }))
+      : [];
+  const entries = Array.isArray(value.statusEntries)
+    ? value.statusEntries.filter(isRecord).map((item) => ({
+        index: String(item.index ?? ""),
+        worktree: String(item.worktree ?? ""),
+        path: String(item.path ?? ""),
+      }))
+    : [];
+  const equivalent = Array.isArray(value.equivalent)
+    ? value.equivalent
+        .filter((pair): pair is [unknown, unknown] => Array.isArray(pair) && pair.length === 2)
+        .map((pair) => [String(pair[0]), String(pair[1])] as [string, string])
+    : [];
+  const number = (input: unknown) => (typeof input === "number" && Number.isFinite(input) ? input : 0);
+  return {
+    kind,
+    reason: String(value.reason ?? ""),
+    ahead: number(value.ahead),
+    behind: number(value.behind),
+    mergeBase: asNullableString(value.mergeBase),
+    mergeBaseDate: asNullableString(value.mergeBaseDate),
+    localOnly: briefs(value.localOnly),
+    upstreamOnly: briefs(value.upstreamOnly),
+    equivalent,
+    statusEntries: entries,
+    staged: number(value.staged),
+    modified: number(value.modified),
+    untracked: number(value.untracked),
+  };
+}
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "interrupted"]);
 
@@ -97,6 +158,7 @@ function parseEvent(value: unknown): TaskEvent | null {
     repoId: asNullableNumber(value.repoId),
     repoStatus: asNullableString(value.repoStatus),
     conflictReason: asNullableString(value.conflictReason),
+    conflict: parseConflictDetail(value.conflict),
     requestedAction: asNullableString(value.requestedAction),
     backupPath: asNullableString(value.backupPath),
     event: typeof value.event === "string" ? value.event : undefined,
@@ -141,6 +203,7 @@ function parseConflict(value: unknown): TaskConflict | null {
     repoPath: value.repoPath,
     status: status as TaskConflict["status"],
     conflictReason: asNullableString(value.conflictReason),
+    conflictDetail: parseConflictDetail(value.conflict),
     allowedActions,
     requestedAction,
     result: asNullableString(value.result),
