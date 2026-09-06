@@ -63,6 +63,34 @@ $bare = Join-Path $rootB 'archives/bare-demo.git'
 & git init --bare -q -- $bare
 if ($LASTEXITCODE -ne 0) { throw "failed to create bare fixture" }
 
+# diverged-demo：上游 force-push 重写历史后本地与上游分叉
+$divergedRemote = Join-Path $remoteRoot 'diverged-demo.git'
+& git init --bare -q -- $divergedRemote
+if ($LASTEXITCODE -ne 0) { throw "failed to create diverged bare fixture remote" }
+$divergedSeed = Join-Path $seed 'diverged-demo'
+New-WorkingRepository $divergedSeed $divergedRemote
+Invoke-Git $divergedSeed @('push', '-q', '-u', 'origin', 'main')
+Invoke-Git $divergedRemote @('symbolic-ref', 'HEAD', 'refs/heads/main')
+# 上游追加 base 提交，本地同步到同一点
+Set-Content -LiteralPath (Join-Path $divergedSeed 'base.txt') -Value "shared base`n" -Encoding utf8
+Invoke-Git $divergedSeed @('add', 'base.txt')
+Invoke-Git $divergedSeed @('commit', '-q', '-m', 'shared base commit')
+Invoke-Git $divergedSeed @('push', '-q')
+$diverged = Join-Path $rootB 'network/diverged-demo'
+New-Item -ItemType Directory -Path (Split-Path -Parent $diverged) -Force | Out-Null
+& git clone --quiet -- $divergedRemote $diverged
+if ($LASTEXITCODE -ne 0) { throw "failed to clone diverged fixture" }
+# 本地提交 rewritten.txt（与上游即将重做的提交同文件同内容 → patch 等价，模拟回退后重做）
+Set-Content -LiteralPath (Join-Path $diverged 'rewritten.txt') -Value "rewritten upstream commit`n" -Encoding utf8
+Invoke-Git $diverged @('add', 'rewritten.txt')
+Invoke-Git $diverged @('commit', '-q', '-m', 'rewritten upstream commit')
+# 上游 reset 回 base 前一个提交（丢弃 shared base），重新提交同内容 base 重写历史后 force-push
+Invoke-Git $divergedSeed @('reset', '-q', '--hard', 'HEAD~1')
+Set-Content -LiteralPath (Join-Path $divergedSeed 'rewritten.txt') -Value "rewritten upstream commit`n" -Encoding utf8
+Invoke-Git $divergedSeed @('add', 'rewritten.txt')
+Invoke-Git $divergedSeed @('commit', '-q', '-m', 'rewritten upstream commit')
+Invoke-Git $divergedSeed @('push', '-q', '--force')
+
 $manifest = [ordered]@{
     source = 'synthetic; never copied from S:\\zeogit-ref'
     rootA = $rootA
@@ -72,7 +100,8 @@ $manifest = [ordered]@{
         'root-a/network/dirty-demo',
         'root-a/self/own-demo',
         'root-b/agents/fork-demo',
-        'root-b/archives/bare-demo.git'
+        'root-b/archives/bare-demo.git',
+        'root-b/network/diverged-demo'
     )
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $TargetRoot 'manifest.json') -Encoding utf8

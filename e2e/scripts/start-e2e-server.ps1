@@ -4,6 +4,14 @@ $ProjectRoot = (Resolve-Path "$PSScriptRoot/../..").Path
 $Staging = Join-Path $ProjectRoot ".staging/e2e-playwright"
 $Db = Join-Path $Staging "xingshu.db"
 
+# 端口预检：残留的上一轮 server 会让本轮 409（pull task already running），必须先清场
+$portListeners = Get-NetTCPConnection -LocalPort 12681 -State Listen -ErrorAction SilentlyContinue
+foreach ($listener in $portListeners) {
+    Write-Host "[e2e] killing stale server pid=$($listener.OwningProcess) on port 12681"
+    Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+}
+
 Write-Host "[e2e] staging=$Staging db=$Db"
 
 # Clean previous staging if exists (idempotent for webServer reuse)
