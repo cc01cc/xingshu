@@ -315,6 +315,18 @@ paths:
             text/event-stream:
               schema: { type: string }
         '404': { $ref: '#/components/responses/ProblemResponse' }
+  /api/v1/open:
+    post:
+      operationId: openPath
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OpenPathRequest' }
+      responses:
+        '204': { description: Directory opened in the OS file manager }
+        '400': { $ref: '#/components/responses/ProblemResponse' }
+        '500': { $ref: '#/components/responses/ProblemResponse' }
   /api/v1/tags/{tagId}:
     delete:
       operationId: deleteTag
@@ -493,12 +505,82 @@ components:
         repoPath: { type: string }
         status: { type: string, enum: [waiting_decision, resolving, failed, interrupted] }
         conflictReason: { type: [string, 'null'] }
+        conflict:
+          oneOf:
+            - $ref: '#/components/schemas/ConflictInfoDirty'
+            - $ref: '#/components/schemas/ConflictInfoDiverged'
+          nullable: true
+          description: Structured conflict details; null falls back to conflictReason text.
         allowedActions: { type: array, items: { type: string, enum: [backup, overwrite, abort] } }
         requestedAction: { type: [string, 'null'], enum: [backup, overwrite, abort, null] }
         result: { type: [string, 'null'] }
         durationMs: { type: [integer, 'null'], minimum: 0 }
         backupPath: { type: [string, 'null'] }
         error: { type: [string, 'null'] }
+    ConflictInfoDirty:
+      type: object
+      required: [kind, reason, ahead, behind, localOnly, upstreamOnly, equivalent, statusEntries, staged, modified, untracked]
+      properties:
+        kind: { type: string, const: dirty }
+        reason: { type: string }
+        ahead: { type: integer, minimum: 0 }
+        behind: { type: integer, minimum: 0 }
+        mergeBase: { type: [string, 'null'] }
+        mergeBaseDate: { type: [string, 'null'] }
+        localOnly: { type: array, items: { $ref: '#/components/schemas/CommitBrief' } }
+        upstreamOnly: { type: array, items: { $ref: '#/components/schemas/CommitBrief' } }
+        equivalent:
+          type: array
+          description: Patch-equivalent (local, upstream) short-hash pairs from `git cherry`.
+          items: { type: array, items: { type: string }, minItems: 2, maxItems: 2 }
+        statusEntries:
+          type: array
+          description: `git status --porcelain` entries (index code, worktree code, path).
+          items:
+            type: object
+            required: [index, worktree, path]
+            properties:
+              index: { type: string }
+              worktree: { type: string }
+              path: { type: string }
+        staged: { type: integer, minimum: 0 }
+        modified: { type: integer, minimum: 0 }
+        untracked: { type: integer, minimum: 0 }
+    ConflictInfoDiverged:
+      type: object
+      required: [kind, reason, ahead, behind, mergeBase, localOnly, upstreamOnly, equivalent, statusEntries, staged, modified, untracked]
+      properties:
+        kind: { type: string, enum: [diverged, nonFf] }
+        reason: { type: string }
+        ahead: { type: integer, minimum: 0 }
+        behind: { type: integer, minimum: 0 }
+        mergeBase: { type: [string, 'null'] }
+        mergeBaseDate: { type: [string, 'null'] }
+        localOnly: { type: array, items: { $ref: '#/components/schemas/CommitBrief' } }
+        upstreamOnly: { type: array, items: { $ref: '#/components/schemas/CommitBrief' } }
+        equivalent:
+          type: array
+          description: Patch-equivalent (local, upstream) short-hash pairs from `git cherry`.
+          items: { type: array, items: { type: string }, minItems: 2, maxItems: 2 }
+        statusEntries: { type: array, items: { type: object } }
+        staged: { type: integer, minimum: 0 }
+        modified: { type: integer, minimum: 0 }
+        untracked: { type: integer, minimum: 0 }
+    CommitBrief:
+      type: object
+      required: [short, summary, author, date]
+      properties:
+        short: { type: string }
+        summary: { type: string }
+        author: { type: string }
+        date: { type: string }
+    OpenPathRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Absolute path to open; must canonicalize under at least one registered root.
     TaskRepoDecision:
       type: object
       required: [action]

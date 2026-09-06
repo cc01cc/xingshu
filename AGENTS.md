@@ -63,7 +63,7 @@ See `mise.toml` for `dev:server/dev:ui/build/test/lint/typecheck/clean/staging`.
 - `crates/xingshu-cli/`: `xingshu` binary
 - `crates/xingshu-server/`: localhost Axum API and static WebUI host
 - `webui/`: Vue/Vite UI
-- `e2e/`: Playwright CLI E2E（`playwright.config.ts` + `tests/xingshu.spec.ts` 11 用例 + `scripts/start-e2e-server.ps1`）
+- `e2e/`: Playwright CLI E2E（`playwright.config.ts` + `tests/xingshu.spec.ts` 15 用例 + `scripts/start-e2e-server.ps1`；含 dirty/diverged 冲突面板、open API、favicon 用例）
 - `scripts/create-test-staging.ps1`: only synthetic staging generator
 - `scripts/create-real-test-staging.ps1`: real-git staging helper（读 `S:\zeogit-ref`，写 `.staging/`）
 - `scripts/stage-sample.ps1`: guarded copy helper, dry-run by default
@@ -79,7 +79,9 @@ Do not push credentials, staging data, runtime databases, `target/`, or `webui/n
 ## Backup & Conflict
 
 - `third-party`/`third-party-frozen` 为只读，`modify_lock=1`；`fork/own` 可写。`repo_kind` 首次启发后重扫不覆盖，需 `kind set` 显式改。
-- 拉取冲突（工作区脏或非 fast-forward）策略：`Stop` 直给 `ConflictNeedsDecision`，`Abort` 跳过，`Backup` 走 `fs::rename → .bak.<YYYYMMDDHHmmSS.mmm>`（同父目录、原子移动、已存在则 `_1`/`_2` 递增，`scanner` 通过 `*.bak.*`/`*.broken.*` 忽略），`Overwrite` 走 `reset --hard + clean -fd + pull --ff-only`。
+- 冲突三态（PLAN-250）：`dirty`（工作区变更，面板含 status 明细+后果对照）、`diverged/non-ff`（fetch 后分叉，双栏提交清单+`git cherry` ≡ 补丁等价标记）、`ahead_clean`（纯领先不进面板，`pull` 记 `ahead`，列表显示"本地领先"徽标）。离线回退旧判定。
+- 拉取冲突（工作区脏或非 fast-forward）策略：`Stop` 直给 `ConflictNeedsDecision`（携带 `ConflictInfo`），`Abort` 跳过，`Backup` 走 `fs::rename → .bak.<YYYYMMDDHHmmSS.mmm>`（同父目录、原子移动、已存在则 `_1`/`_2` 递增，`scanner` 通过 `*.bak.*`/`*.broken.*` 忽略），`Overwrite` 走 `reset --hard + clean -fd + pull --ff-only`（UI 强制二次确认）。
+- `POST /api/v1/open`：打开仓库/备份目录（canonicalize + 已注册 root 白名单，防 CSRF 越界）。
 - 备份后拉取为**全量重克隆** `git clone <remote_url> <name>`，非增量 `fetch`；无 `remote_url` 时拒绝克隆并保留备份。
 
 ## Output Readability

@@ -14,3 +14,6 @@ All notable changes to Xingshu are recorded here.
 - Added persisted asynchronous scan/batch-pull tasks, SSE progress streams, reconnect fallback, and WebUI task progress panels.
 - Added task API contract coverage, restart interruption checks, and a compiled-server HTTP/SSE integration test.
 - Added task-level conflict decisions with persisted per-repository state, conflict listing, explicit backup/overwrite/abort actions, and restart-safe resolution handling.
+- Added structured pull-conflict taxonomy (dirty / diverged·non-ff / ahead-clean), WebUI conflict panels with file lists, dual-column commit views, `git cherry` patch-equivalence markers, and action-consequence hints.
+- Added "local ahead" passive badge for clean-ahead repositories (possible upstream rollback) and overwrite double-confirmation.
+- Added `POST /api/v1/open` directory-opening API with registered-root allowlist, favicon fix, and staged diverged fixture for E2E.
