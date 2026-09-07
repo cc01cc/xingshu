@@ -11,11 +11,11 @@ export default defineConfig({
   },
   server: {
     host: "127.0.0.1",
-    port: 12680,
+    port: Number(process.env.XINGSHU_WEB_PORT ?? 12680),
     strictPort: true,
     proxy: {
-      "/api": "http://127.0.0.1:12681",
-      "/health": "http://127.0.0.1:12681",
+      "/api": `http://127.0.0.1:${process.env.XINGSHU_PORT ?? 12681}`,
+      "/health": `http://127.0.0.1:${process.env.XINGSHU_PORT ?? 12681}`,
     },
   },
 });
