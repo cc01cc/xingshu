@@ -2,7 +2,7 @@
 XINGSHU_PORT = "12681"
 
 [tools]
-node = "22"
+node = "24"
 pnpm = "10"
 rust = "1.88"
 
