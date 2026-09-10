@@ -305,6 +305,14 @@ paths:
       operationId: streamTask
       parameters:
         - { $ref: '#/components/parameters/TaskId' }
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Resume cursor. The server always sends a fresh snapshot
+            first, then replays only in-memory events with sequence greater
+            than this id (already-seen events are suppressed, never replacing
+            the persisted snapshot).
       responses:
         '200':
           description: Server-sent task snapshot and progress events

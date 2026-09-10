@@ -19,6 +19,11 @@
 
 `TAGS` 是星枢自己的领域标签，不是 Git tag。`repo_kind` 区分第三方、冻结、fork 和自有仓库；`policy set` 可设置 repo 或 tag 的更新和冲突策略，repo policy 优先。
 
+## 进度输出
+
+- `scan`/`pull` 逐项输出进度到 stderr（`[N] <repo>: <result> (<ms>ms)`），`scan` 的最终 JSON 报告仍输出到 stdout，可直接管道解析。
+- `pull` 输出带计数与耗时：`[i/total] <org>/<name>: <result> (<ms>ms)`，失败项输出到 stderr 并带同样的计数前缀；最后 stderr 汇总已处理总数。
+
 ## 安全参数
 
 - 交互 pull 冲突策略默认 `stop`。

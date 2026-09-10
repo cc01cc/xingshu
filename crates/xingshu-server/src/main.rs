@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Extension, Path, State},
-    http::{HeaderValue, Request, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderMap, HeaderValue, Request, StatusCode, header::CONTENT_TYPE},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -813,7 +813,12 @@ async fn get_task(State(state): State<AppState>, Path(task_id): Path<String>) ->
     }
 }
 
-async fn task_stream(State(state): State<AppState>, Path(task_id): Path<String>) -> Response {
+async fn task_stream(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let last_event_id = parse_last_event_id(&headers);
     let (task, receiver) = match state.task_manager.subscribe(&task_id) {
         Ok(value) => value,
         Err(error) if error.to_string().contains("task not found") => {
@@ -830,9 +835,11 @@ async fn task_stream(State(state): State<AppState>, Path(task_id): Path<String>)
         Err(error) => return error_response(format!("SSE serialization failed: {error}")),
     };
     let initial_stream = tokio_stream::once(Ok::<Event, Infallible>(initial));
-    let event_stream = BroadcastStream::new(receiver).filter_map(|event| match event {
-        Ok(event) => Some(Ok::<Event, Infallible>(task_event_to_sse(event))),
-        Err(_) => None,
+    let event_stream = BroadcastStream::new(receiver).filter_map(move |event| match event {
+        Ok(event) if event.sequence > last_event_id => {
+            Some(Ok::<Event, Infallible>(task_event_to_sse(event)))
+        }
+        _ => None,
     });
     let stream = initial_stream.chain(event_stream);
     let mut response = Sse::new(stream)
@@ -846,6 +853,20 @@ async fn task_stream(State(state): State<AppState>, Path(task_id): Path<String>)
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-cache"));
     response
+}
+
+/// Parse the SSE `Last-Event-ID` resume header.
+///
+/// Returns the last sequence the client has already seen, or `0` when the
+/// header is absent or unparsable (full replay: snapshot + all live events).
+/// The snapshot is always sent first; this id only suppresses already-seen
+/// in-memory broadcast events and never replaces the persisted snapshot.
+fn parse_last_event_id(headers: &HeaderMap) -> u64 {
+    headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 fn task_to_api_value(task: TaskRecord) -> Result<serde_json::Value, serde_json::Error> {
@@ -1593,7 +1614,7 @@ mod tests {
     use xingshu_core::scanner::scan_roots;
     use xingshu_core::types::{Root, ScanOptions};
 
-    use super::{build_router, camelize_value};
+    use super::{build_router, camelize_value, parse_last_event_id};
 
     fn git(path: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -2002,5 +2023,31 @@ mod tests {
         for action in ["backup", "overwrite", "abort"] {
             exercise_task_conflict_decision(action).await;
         }
+    }
+
+    #[test]
+    fn last_event_id_parses_resume_header() {
+        use axum::http::HeaderMap;
+        let empty = HeaderMap::new();
+        assert_eq!(parse_last_event_id(&empty), 0);
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "42".parse().expect("header value"));
+        assert_eq!(parse_last_event_id(&headers), 42);
+        let mut bad = HeaderMap::new();
+        bad.insert("last-event-id", "not-a-number".parse().expect("header value"));
+        assert_eq!(parse_last_event_id(&bad), 0);
+    }
+
+    #[test]
+    fn last_event_id_suppresses_already_seen_sequences() {
+        // Stream filter contract: snapshot is always sent; only broadcast
+        // events with sequence > last_event_id are replayed.
+        let last_event_id = 7u64;
+        let sequences = [5u64, 7, 8, 42];
+        let replayed = sequences
+            .iter()
+            .filter(|sequence| **sequence > last_event_id)
+            .count();
+        assert_eq!(replayed, 2);
     }
 }

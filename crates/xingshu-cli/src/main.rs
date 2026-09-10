@@ -1,13 +1,15 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
+use xingshu_core::ProgressReporter;
 use xingshu_core::db::Database;
 use xingshu_core::policy::default_for_kind;
 use xingshu_core::puller::{PullMode, make_fetch_log, pull_repo};
-use xingshu_core::scanner::scan_roots;
+use xingshu_core::scanner::scan_roots_with_reporter;
 use xingshu_core::types::{Policy as RepoPolicy, RepoKind, RepoRecord, Root, ScanOptions};
 
 #[derive(Debug, Parser)]
@@ -137,6 +139,38 @@ struct MoveArgs {
     root: i64,
 }
 
+/// Synchronous CLI progress reporter (PLAN-208 M5).
+///
+/// Prints per-item progress to stderr so stdout stays machine-readable
+/// (scan still emits the final JSON report to stdout).
+#[derive(Debug, Default)]
+struct CliReporter {
+    current: AtomicU64,
+}
+
+impl ProgressReporter for CliReporter {
+    fn started(&self, total: Option<u64>) {
+        self.current.store(0, Ordering::Relaxed);
+        match total {
+            Some(total) => eprintln!("started: 0/{total}"),
+            None => eprintln!("started: discovering repositories"),
+        }
+    }
+
+    fn item_finished(&self, item: &str, result: &str, duration_ms: Option<u64>) {
+        let current = self.current.fetch_add(1, Ordering::Relaxed) + 1;
+        match duration_ms {
+            Some(duration_ms) => eprintln!("[{current}] {item}: {result} ({duration_ms}ms)"),
+            None => eprintln!("[{current}] {item}: {result}"),
+        }
+    }
+
+    fn finished(&self, result: &str) {
+        let current = self.current.load(Ordering::Relaxed);
+        eprintln!("finished: {current} items, result={result}");
+    }
+}
+
 fn main() -> Result<()> {
     init_logging();
     let cli = Cli::parse();
@@ -252,8 +286,9 @@ fn scan(database: &Database, args: ScanArgs) -> Result<()> {
         my_orgs: args.my_orgs,
         ..ScanOptions::default()
     };
-    let report =
-        scan_roots(database, &roots, &options).map_err(|error| anyhow!(error.to_string()))?;
+    let reporter = CliReporter::default();
+    let report = scan_roots_with_reporter(database, &roots, &options, Some(&reporter))
+        .map_err(|error| anyhow!(error.to_string()))?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -432,16 +467,25 @@ fn pull(database: &Database, args: PullArgs) -> Result<()> {
     } else {
         PullMode::Interactive
     };
+    let total = repos.len();
+    eprintln!("pull started: 0/{total}");
     if matches!(mode, PullMode::Interactive) {
-        for repo in &repos {
-            report_pull(database, &roots, repo, mode)?;
+        for (index, repo) in repos.iter().enumerate() {
+            report_pull(database, &roots, repo, mode, Some((index + 1, total)))?;
         }
     } else {
+        let done = AtomicU64::new(0);
+        let roots_ref: &[Root] = &roots;
         for chunk in repos.chunks(args.jobs) {
             std::thread::scope(|scope| {
                 let handles = chunk
                     .iter()
-                    .map(|repo| scope.spawn(|| report_pull(database, &roots, repo, mode)))
+                    .map(|repo| {
+                        let position = done.fetch_add(1, Ordering::Relaxed) as usize + 1;
+                        scope.spawn(move || {
+                            report_pull(database, roots_ref, repo, mode, Some((position, total)))
+                        })
+                    })
                     .collect::<Vec<_>>();
                 for handle in handles {
                     match handle.join() {
@@ -453,6 +497,7 @@ fn pull(database: &Database, args: PullArgs) -> Result<()> {
             });
         }
     }
+    eprintln!("pull finished: {total} repositories processed");
     Ok(())
 }
 
@@ -461,6 +506,7 @@ fn report_pull(
     roots: &[Root],
     repo: &RepoRecord,
     mode: PullMode,
+    progress: Option<(usize, usize)>,
 ) -> Result<()> {
     let Some(root) = roots.iter().find(|root| root.id == Some(repo.root_id)) else {
         return Err(anyhow!("root {} not found", repo.root_id));
@@ -520,7 +566,14 @@ fn report_pull(
                 duration_ms = started.elapsed().as_millis() as u64,
                 "pull worker completed"
             );
-            println!("{}: {}", repo.org, outcome.result);
+            let duration_ms = started.elapsed().as_millis();
+            match progress {
+                Some((position, total)) => println!(
+                    "[{position}/{total}] {}/{}: {} ({duration_ms}ms)",
+                    repo.org, repo.name, outcome.result
+                ),
+                None => println!("{}/{}: {} ({duration_ms}ms)", repo.org, repo.name, outcome.result),
+            }
         }
         Err(error) => {
             tracing::error!(
@@ -530,7 +583,12 @@ fn report_pull(
                 error = %error,
                 "pull worker failed"
             );
-            eprintln!("{}: {error}", path.display());
+            match progress {
+                Some((position, total)) => {
+                    eprintln!("[{position}/{total}] {}: {error}", path.display());
+                }
+                None => eprintln!("{}: {error}", path.display()),
+            }
         }
     }
     Ok(())
