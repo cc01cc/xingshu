@@ -6,7 +6,7 @@
 
 名称说明：星取群星意象，每个项目像一颗独立的星；枢取中枢与索引枢轴之意，将项目星群汇聚、发现、分类和管理。名称受“天枢”等天文意象启发，是本项目自拟组合。
 
-端口登记见 workspace 文档 `../docs/PORT-001-port-registry.md`：WebUI `12680`，API/server `12681`。
+端口约定：WebUI `12680`，API/server `12681`。
 
 文档入口：`docs/AGENTS.md`。
 

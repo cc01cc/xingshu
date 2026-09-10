@@ -6,7 +6,7 @@
 
 ## Current Status
 
-首版核心、CLI、API、基础 WebUI、异步任务实时进度、结构化日志、分层测试和正式 Playwright MCP 验证已完成；后续功能演进见 PLAN-198。
+首版核心、CLI、API、基础 WebUI、异步任务实时进度、结构化日志、分层测试和正式 Playwright 验证已完成；后续功能演进规划中。
 
 ## Quick Start
 
@@ -72,7 +72,7 @@ xingshu stats
 - 中文文档：`docs/i18n/zh-Hans/README.md`
 - English docs: `docs/i18n/en/README.md`
 - API contract: `docs/api/openapi.yaml`
-- Workspace ports: `../docs/PORT-001-port-registry.md`
+- Ports: WebUI `12680`，API/server `12681`
 
 ## Development
 
