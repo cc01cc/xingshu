@@ -37,8 +37,10 @@ jobs:
       - name: Install project dependencies
         run: mise run setup
       # This is the task set behind `mise run validate`, split into named steps so public check runs identify the failing gate.
-      - name: Release gate — Rust and WebUI lint
-        run: mise run lint
+      - name: Release gate — Rust formatting
+        run: mise run lint:fmt
+      - name: Release gate — Rust Clippy
+        run: mise run lint:core
       - name: Release gate — WebUI typecheck
         run: mise run typecheck
       - name: Release gate — Rust and WebUI build
