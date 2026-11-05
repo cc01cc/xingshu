@@ -70,6 +70,18 @@ fn mover_rejects_insufficient_injected_space() {
     assert!(error.to_string().contains("insufficient space"));
 }
 
+#[cfg(unix)]
+#[test]
+fn available_space_reports_free_bytes_for_unix_path() {
+    let temp = tempfile::Builder::new()
+        .prefix("xingshu available space ")
+        .tempdir()
+        .expect("temp");
+    let available = available_space(temp.path()).expect("df free bytes");
+    assert!(available > 0);
+}
+
+#[cfg(windows)]
 #[test]
 fn available_space_rejects_paths_without_drive_letter() {
     let error = available_space(Path::new("/rooted/absolute")).expect_err("no drive letter");

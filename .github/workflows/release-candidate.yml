@@ -438,7 +438,7 @@ jobs:
             buildRunner: process.env.BUILD_RUNNER,
             crtLinkage: "dynamic-glibc",
             dynamicLibraries: JSON.parse(process.env.DYNAMIC_LIBRARIES_JSON),
-             runtimeDependencies: ["Git executable on PATH", "glibc 2.35+", ...JSON.parse(process.env.DYNAMIC_LIBRARIES_JSON)],
+             runtimeDependencies: ["Git executable on PATH", "df executable on PATH", "glibc 2.35+", ...JSON.parse(process.env.DYNAMIC_LIBRARIES_JSON)],
             gitVersion: process.env.GIT_VERSION,
             buildChannel: "release",
             signatureStatus: "unsigned",

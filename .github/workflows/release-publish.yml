@@ -146,7 +146,7 @@ jobs:
               expected_runtime_dependencies="$expected_runtime_prefix"
             else
               jq -e 'type == "array" and length > 0 and index("libc.so.6") != null and all(.[]; test("^[A-Za-z0-9_.+-]+\\.so(\\.[0-9]+)*$"))' <<<"$dynamic_libraries" >/dev/null
-              expected_runtime_dependencies="$(jq -cn --argjson libs "$dynamic_libraries" '(["Git executable on PATH", "glibc 2.35+"] + $libs) | sort')"
+              expected_runtime_dependencies="$(jq -cn --argjson libs "$dynamic_libraries" '(["Git executable on PATH", "df executable on PATH", "glibc 2.35+"] + $libs) | sort')"
             fi
             [[ "$(jq -r '.minimumOsAbi // empty' "$manifest_path")" == "$expected_minimum_abi" ]]
             [[ "$(jq -r '.buildRunner // empty' "$manifest_path")" == "$expected_runner" ]]

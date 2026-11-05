@@ -605,8 +605,12 @@ fn sanitize_repo_relative(dir: &std::path::Path, raw: &str) -> anyhow::Result<St
     if trimmed.is_empty() {
         anyhow::bail!("invalid path: empty");
     }
-    let candidate = std::path::Path::new(trimmed);
-    if candidate.is_absolute() {
+    let normalized = trimmed.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    let has_windows_drive_prefix =
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let candidate = std::path::Path::new(&normalized);
+    if candidate.is_absolute() || has_windows_drive_prefix {
         anyhow::bail!("invalid path: absolute paths are rejected");
     }
     let mut relative = String::new();
@@ -2750,6 +2754,12 @@ mod tests {
 
         let response = get(format!(
             "/api/v1/repos/{repo_id}/diff?path=C%3A%2FWindows%2Fwin.ini"
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = get(format!(
+            "/api/v1/repos/{repo_id}/diff?path=..%5Coutside.txt"
         ))
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);

@@ -83,6 +83,7 @@ fn directory_size(path: &Path) -> u64 {
         .sum()
 }
 
+#[cfg(windows)]
 pub fn available_space(path: &Path) -> Result<u64, VcsError> {
     let drive = path
         .to_string_lossy()
@@ -106,4 +107,36 @@ pub fn available_space(path: &Path) -> Result<u64, VcsError> {
         .trim()
         .parse::<u64>()
         .map_err(|error| VcsError::Filesystem(format!("invalid free space: {error}")))
+}
+
+#[cfg(unix)]
+pub fn available_space(path: &Path) -> Result<u64, VcsError> {
+    let output = std::process::Command::new("df")
+        .args(["-Pk"])
+        .arg(path)
+        .output()
+        .map_err(|error| VcsError::Filesystem(format!("run df: {error}")))?;
+    if !output.status.success() {
+        return Err(VcsError::Filesystem(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    let output = String::from_utf8_lossy(&output.stdout);
+    let available_kib = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .next_back()
+        .and_then(|line| line.split_whitespace().nth(3))
+        .ok_or_else(|| VcsError::Filesystem(format!("invalid df output for {}", path.display())))?
+        .parse::<u64>()
+        .map_err(|error| VcsError::Filesystem(format!("invalid available space: {error}")))?;
+    Ok(available_kib.saturating_mul(1024))
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn available_space(path: &Path) -> Result<u64, VcsError> {
+    Err(VcsError::Filesystem(format!(
+        "available-space query is unsupported for {}",
+        path.display()
+    )))
 }
