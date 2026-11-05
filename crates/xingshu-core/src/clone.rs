@@ -457,11 +457,9 @@ fn relative_path_key(path: &Path) -> Option<String> {
     for component in path.components() {
         match component {
             Component::Normal(part) => {
-                let mut value = part.to_string_lossy().replace('\\', "/");
+                let value = part.to_string_lossy().replace('\\', "/");
                 #[cfg(windows)]
-                {
-                    value = value.to_lowercase();
-                }
+                let value = value.to_lowercase();
                 parts.push(value);
             }
             Component::CurDir => {}
