@@ -830,7 +830,7 @@ fn emit_query_error(kind: &str, message: &str) {
             serde_json::json!({"summary":{"matches":0,"files":0,"repos":0,"source":kind,"complete":false,"truncated":false,"maxResults":null},"results":[],"errors":[error]})
         }
     };
-    println!("{}", value);
+    println!("{value}");
 }
 
 fn emit_index_error(status: bool, requested: usize, message: &str) {
@@ -843,7 +843,7 @@ fn emit_index_error(status: bool, requested: usize, message: &str) {
             "items":[],"errors":[error]
         })
     };
-    println!("{}", value);
+    println!("{value}");
 }
 
 fn output_failed(value: &serde_json::Value) -> bool {
@@ -880,7 +880,7 @@ fn search_command(database: &Database, db_path: &std::path::Path, args: QueryArg
         Ok(output) => {
             let value = serde_json::to_value(&output)?;
             if args.json {
-                println!("{}", value);
+                println!("{value}");
             } else {
                 search_output::print_search_human(&output);
             }
@@ -957,7 +957,7 @@ fn grep_command(database: &Database, db_path: &std::path::Path, args: GrepArgs) 
         Ok(output) => {
             let value = serde_json::to_value(&output)?;
             if args.json {
-                println!("{}", value);
+                println!("{value}");
             } else {
                 search_output::print_search_human(&output);
             }
@@ -1003,7 +1003,7 @@ fn files_command(database: &Database, db_path: &std::path::Path, args: FilesArgs
             let value = serde_json::to_value(&output)?;
             let failed = output_failed(&value);
             if args.json {
-                println!("{}", value);
+                println!("{value}");
             } else {
                 search_output::print_files_human(&output);
             }
