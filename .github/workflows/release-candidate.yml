@@ -56,7 +56,7 @@ jobs:
             os: linux
             archive: tar.gz
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/xingshu-candidate-cargo-${{ matrix.target }}-${{ github.run_id }}
+      CARGO_TARGET_DIR: target/release-candidate-${{ matrix.target }}-${{ github.run_id }}
       RUST_TARGET: ${{ matrix.target }}
       BUILD_RUNNER: ${{ matrix.runner }}
       XINGSHU_CLI_BUILD_CHANNEL: release
@@ -439,7 +439,7 @@ jobs:
             runner: macos-15
     runs-on: ${{ matrix.runner }}
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/xingshu-macos-build-only-${{ matrix.target }}-${{ github.run_id }}
+      CARGO_TARGET_DIR: target/macos-build-only-${{ matrix.target }}-${{ github.run_id }}
       RUST_TARGET: ${{ matrix.target }}
       XINGSHU_CLI_BUILD_CHANNEL: release
     steps:
