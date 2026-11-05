@@ -57,7 +57,7 @@ jobs:
           if (( test_status != 0 )); then
             failures="$(grep -E '(^test .* FAILED|^failures:|^---- .* stdout ----|panicked at|^error\[|^error:)' "$RUNNER_TEMP/test.log" || true)"
             failure_blocks="$(awk '/^---- .* stdout ----$/ { capture = 1 } capture { print } capture && /^test result:/ { exit }' "$RUNNER_TEMP/test.log" | head -n 100 || true)"
-            diagnostics="$(printf '%s\n%s\n' "$failures" "$failure_blocks" | sed '/^[[:space:]]*$/d' | head -n 50)"
+            diagnostics="$(printf '%s\n%s\n' "$failures" "$failure_blocks" | sed '/^[[:space:]]*$/d' | head -n 35)"
             if [[ -n "$diagnostics" ]]; then
               {
                 echo '### Test failures'
@@ -65,7 +65,10 @@ jobs:
                 printf '%s\n' "$diagnostics"
                 echo '```'
               } >> "$GITHUB_STEP_SUMMARY"
-              while IFS= read -r line; do echo "::error::$line"; done <<<"$diagnostics"
+              annotation="${diagnostics//'%'/'%25'}"
+              annotation="${annotation//$'\r'/'%0D'}"
+              annotation="${annotation//$'\n'/'%0A'}"
+              echo "::error title=Candidate test failure::$annotation"
             fi
           fi
           exit "$test_status"
