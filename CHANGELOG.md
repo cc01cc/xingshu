@@ -4,7 +4,7 @@ All notable changes to Xingshu are recorded here.
 
 ## Unreleased
 
-## [0.1.0] - 2026-11-05
+## [0.1.0] - 2026-11-06
 
 ### CLI distribution
 
