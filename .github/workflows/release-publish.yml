@@ -47,7 +47,6 @@ jobs:
               | select(.event == "push")
               | select(.repository.full_name == $repo)
               | select((.head_repository.full_name // $repo) == $repo)
-              | select((.path // "") | startswith(".github/workflows/release-candidate.yml@"))
             ] | sort_by(.created_at) | last // empty
           ' "$run_json")"
           if [[ -z "$candidate_run" ]]; then
