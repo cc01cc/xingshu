@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: xs-candidate-${{ github.run_id }}
-  cancel-in-progress: false
+  group: xs-candidate-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -42,25 +42,7 @@ jobs:
       - name: Release gate — Rust formatting
         run: mise run lint:fmt
       - name: Release gate — Rust Clippy
-        shell: bash
-        run: |
-          set +e
-          mise run lint:core 2>&1 | tee "$RUNNER_TEMP/clippy.log"
-          clippy_status=${PIPESTATUS[0]}
-          set -e
-          if (( clippy_status != 0 )); then
-            diagnostics="$(grep -E '(^error:|^warning:|[[:space:]]--> )' "$RUNNER_TEMP/clippy.log" | head -n 30 || true)"
-            if [[ -n "$diagnostics" ]]; then
-              {
-                echo '### Clippy diagnostics'
-                echo '```text'
-                printf '%s\n' "$diagnostics"
-                echo '```'
-              } >> "$GITHUB_STEP_SUMMARY"
-              while IFS= read -r line; do echo "::error::$line"; done <<<"$diagnostics"
-            fi
-          fi
-          exit "$clippy_status"
+        run: mise run lint:core
       - name: Release gate — WebUI typecheck
         run: mise run typecheck
       - name: Release gate — Rust and WebUI build
