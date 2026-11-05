@@ -48,7 +48,25 @@ jobs:
       - name: Release gate — Rust and WebUI build
         run: mise run build
       - name: Release gate — release-prep and workspace tests
-        run: mise run test
+        shell: bash
+        run: |
+          set +e
+          mise run test 2>&1 | tee "$RUNNER_TEMP/test.log"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if (( test_status != 0 )); then
+            failures="$(grep -E '(^test .* FAILED|^failures:|^---- .* stdout ----|panicked at|^error\[|^error:)' "$RUNNER_TEMP/test.log" | head -n 40 || true)"
+            if [[ -n "$failures" ]]; then
+              {
+                echo '### Test failures'
+                echo '```text'
+                printf '%s\n' "$failures"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              while IFS= read -r line; do echo "::error::$line"; done <<<"$failures"
+            fi
+          fi
+          exit "$test_status"
 
   windows-linux-candidates:
     name: Candidate ${{ matrix.target }}
