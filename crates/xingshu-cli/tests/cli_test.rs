@@ -108,6 +108,18 @@ fn create_fixture_repo(path: &Path) {
     git(path, &["commit", "-q", "-m", "fixture"]);
 }
 
+fn output_has_repo_name(output: &str, name: &str) -> bool {
+    output.lines().any(|line| {
+        line.split_whitespace().any(|column| {
+            column
+                .trim_end_matches(':')
+                .rsplit('/')
+                .next()
+                .is_some_and(|repo_name| repo_name == name)
+        })
+    })
+}
+
 #[test]
 fn cli_dry_run_root_filter_stats_and_skip_alias() {
     let temp = TempDir::new().expect("temp");
@@ -292,7 +304,12 @@ fn cli_pull_conflict_fallback_backs_up_and_audits() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("local/x: ok"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| output_has_repo_name(line, "x") && line.contains(": ok")),
+        "{stdout}"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unattended"), "{stderr}");
 
@@ -362,7 +379,7 @@ fn cli_status_reports_local_state_and_remote_drift() {
         .expect("status");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("local/s"), "{stdout}");
+    assert!(output_has_repo_name(&stdout, "s"), "{stdout}");
 
     let output = Command::new(binary)
         .args(["--db", db_arg, "status", "--remote"])
