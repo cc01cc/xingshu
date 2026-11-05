@@ -9,6 +9,8 @@ description = "Embeddable local repository index and Git workspace core for Xing
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+globset.workspace = true
+regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

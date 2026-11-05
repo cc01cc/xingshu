@@ -158,15 +158,18 @@ fn parse_status_entries(status: &str) -> (Vec<StatusEntry>, u32, u32, u32) {
 }
 
 pub fn divergence(path: &Path) -> Option<ConflictInfo> {
-    let branch = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .ok()?;
+    let branch = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
     let branch = branch.stdout.trim().to_owned();
     if branch.is_empty() || branch == "HEAD" {
         return None;
     }
     let upstream = format!("origin/{branch}");
     run_git(path, &["rev-parse", "--verify", "-q", &upstream]).ok()?;
-    let head = run_git(path, &["rev-parse", "HEAD"]).ok()?.stdout.trim().to_owned();
+    let head = run_git(path, &["rev-parse", "HEAD"])
+        .ok()?
+        .stdout
+        .trim()
+        .to_owned();
     let upstream_commit = run_git(path, &["rev-parse", &upstream])
         .ok()?
         .stdout
@@ -211,13 +214,10 @@ pub fn divergence(path: &Path) -> Option<ConflictInfo> {
 }
 
 fn count_reachable(path: &Path, from: &str, exclude: &str) -> u32 {
-    run_git(
-        path,
-        &["rev-list", "--count", from, &format!("^{exclude}")],
-    )
-    .ok()
-    .and_then(|output| output.stdout.trim().parse().ok())
-    .unwrap_or(0)
+    run_git(path, &["rev-list", "--count", from, &format!("^{exclude}")])
+        .ok()
+        .and_then(|output| output.stdout.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 fn short(commit: &str) -> String {
@@ -228,12 +228,9 @@ fn commit_date(path: &Path, commit: &str) -> Option<String> {
     if commit.is_empty() {
         return None;
     }
-    run_git(
-        path,
-        &["log", "-1", "--format=%cs", commit],
-    )
-    .ok()
-    .map(|output| output.stdout.trim().to_owned())
+    run_git(path, &["log", "-1", "--format=%cs", commit])
+        .ok()
+        .map(|output| output.stdout.trim().to_owned())
 }
 
 fn commit_briefs(path: &Path, range: String) -> Vec<CommitBrief> {
@@ -347,12 +344,20 @@ fn patch_id(path: &Path, commit: &str) -> Option<String> {
 }
 
 pub fn run_git(path: &Path, args: &[&str]) -> Result<GitCommandOutput, VcsError> {
-    let output = Command::new("git")
+    run_git_with_program(std::ffi::OsStr::new("git"), path, args)
+}
+
+fn run_git_with_program(
+    program: &std::ffi::OsStr,
+    path: &Path,
+    args: &[&str],
+) -> Result<GitCommandOutput, VcsError> {
+    let output = Command::new(program)
         .arg("-C")
         .arg(path)
         .args(args)
         .output()
-        .map_err(|error| VcsError::GitCommand(error.to_string()))?;
+        .map_err(git_start_error)?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
@@ -363,6 +368,34 @@ pub fn run_git(path: &Path, args: &[&str]) -> Result<GitCommandOutput, VcsError>
         }));
     }
     Ok(GitCommandOutput { stdout, stderr })
+}
+
+pub(crate) fn git_start_error(error: std::io::Error) -> VcsError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        VcsError::GitCommand(
+            "Git executable not found on PATH; install Git and ensure `git` is available, then restart the terminal".to_owned(),
+        )
+    } else {
+        VcsError::GitCommand(error.to_string())
+    }
+}
+
+/// Read the remote's advertised heads with `git ls-remote` (PLAN-297 ISS-02B).
+///
+/// This is strictly read-only: no objects, refs, or worktree state change
+/// locally. Requires network access and credentials when the remote is private.
+pub fn remote_refs(path: &Path, remote: &str) -> Result<Vec<(String, String)>, VcsError> {
+    let output = run_git(path, &["ls-remote", "--heads", remote])?;
+    Ok(output
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let sha = parts.next()?;
+            let name = parts.next()?;
+            Some((name.to_owned(), sha.to_owned()))
+        })
+        .collect())
 }
 
 pub fn sanitize_remote_url(value: &str) -> String {
@@ -386,4 +419,96 @@ pub fn sanitize_remote_url(value: &str) -> String {
 
 pub fn repo_path(root: &Path, relative: &Path) -> PathBuf {
     root.join(relative)
+}
+
+/// Upper bound for a single-file patch returned by [`diff_text`] (PLAN-0316).
+pub const DIFF_MAX_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffKind {
+    Diff,
+    Binary,
+    Untracked,
+    NoHead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffText {
+    pub kind: DiffKind,
+    pub patch: String,
+    pub truncated: bool,
+}
+
+/// Read-only working-tree diff for one repository-relative path
+/// (staged + unstaged versus HEAD), capped at [`DIFF_MAX_BYTES`].
+pub fn diff_text(path: &Path, rel_path: &str) -> Result<DiffText, VcsError> {
+    if run_git(path, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+        return Ok(DiffText {
+            kind: DiffKind::NoHead,
+            patch: String::new(),
+            truncated: false,
+        });
+    }
+    let tracked = run_git(path, &["ls-files", "--error-unmatch", "--", rel_path]).is_ok();
+    if !tracked {
+        if !path.join(rel_path).exists() {
+            return Err(VcsError::Filesystem(format!("not found: {rel_path}")));
+        }
+        return Ok(DiffText {
+            kind: DiffKind::Untracked,
+            patch: String::new(),
+            truncated: false,
+        });
+    }
+    let numstat = run_git(path, &["diff", "--numstat", "HEAD", "--", rel_path])?;
+    if numstat
+        .stdout
+        .lines()
+        .any(|line| line.starts_with("-\t-\t"))
+    {
+        return Ok(DiffText {
+            kind: DiffKind::Binary,
+            patch: String::new(),
+            truncated: false,
+        });
+    }
+    let output = run_git(path, &["diff", "HEAD", "--no-color", "--", rel_path])?;
+    let (patch, truncated) = cap_diff_text(&output.stdout, DIFF_MAX_BYTES);
+    Ok(DiffText {
+        kind: DiffKind::Diff,
+        patch,
+        truncated,
+    })
+}
+
+fn cap_diff_text(text: &str, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
+        return (text.to_owned(), false);
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_git_executable_has_install_guidance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing_git = temp.path().join("missing-git-executable.exe");
+        let error = run_git_with_program(missing_git.as_os_str(), temp.path(), &["--version"])
+            .expect_err("missing executable must fail");
+        let VcsError::GitCommand(message) = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert!(
+            message.contains("Git executable not found on PATH"),
+            "{message}"
+        );
+        assert!(message.contains("install Git"), "{message}");
+    }
 }

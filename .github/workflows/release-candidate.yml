@@ -1,0 +1,467 @@
+name: XS release candidate artifacts
+
+on:
+  push:
+    branches:
+      - "release-candidate/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xs-candidate-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Full release validation
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a versioned release-candidate branch
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != "branch" || ! "$GITHUB_REF_NAME" =~ ^release-candidate/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Candidate builds must run from release-candidate/v<major>.<minor>.<patch>."
+            exit 1
+          fi
+      - name: Checkout candidate source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned project toolchain without cache
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.10.21
+          cache: false
+      - name: Install project dependencies
+        run: mise run setup
+      - name: Run release quality gate
+        run: mise run validate
+
+  windows-linux-candidates:
+    name: Candidate ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            os: windows
+            archive: zip
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            os: linux
+            archive: tar.gz
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/xingshu-candidate-cargo-${{ matrix.target }}-${{ github.run_id }}
+      RUST_TARGET: ${{ matrix.target }}
+      BUILD_RUNNER: ${{ matrix.runner }}
+      XINGSHU_CLI_BUILD_CHANNEL: release
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install Rust and Node toolchains without cache
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.10.21
+          install_args: rust node
+          cache: false
+      - name: Add target
+        shell: pwsh
+        run: rustup target add $env:RUST_TARGET
+      - name: Build Windows release CLI with static CRT
+        if: matrix.os == 'windows'
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --locked --release -p xingshu-cli --target ${{ matrix.target }}
+      - name: Build Linux release CLI
+        if: matrix.os == 'linux'
+        run: cargo build --locked --release -p xingshu-cli --target ${{ matrix.target }}
+      - name: Smoke test and package Windows CLI
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $binary = Join-Path $env:CARGO_TARGET_DIR "$env:RUST_TARGET\release\xs.exe"
+          if (-not (Test-Path -LiteralPath $binary)) { throw "Missing CLI binary: $binary" }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe is required for the Windows CRT import check" }
+          $vsInstall = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if ([string]::IsNullOrWhiteSpace($vsInstall)) { throw "Visual Studio C++ tools are required for the Windows CRT import check" }
+          $dumpbinPattern = Join-Path $vsInstall "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe"
+          $dumpbin = Get-ChildItem -Path $dumpbinPattern -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) { throw "dumpbin.exe is required for the Windows CRT import check" }
+          $imports = & $dumpbin /dependents $binary
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed to inspect the Windows CLI imports" }
+          $dynamicCrtImports = $imports | Select-String -Pattern '(?i)\b(VCRUNTIME[0-9_]*\.DLL|MSVCP[0-9_]*\.DLL|CONCRT[0-9_]*\.DLL|UCRTBASE\.DLL|MSVCRT\.DLL|API-MS-WIN-CRT-[A-Z0-9-]+\.DLL)\b'
+          if ($dynamicCrtImports) { throw "Static CRT build still imports a VC/UCRT runtime DLL: $($dynamicCrtImports -join '; ')" }
+          $versionOutput = (& $binary --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch '^xs\s+(.+)$') { throw "Invalid xs --version output: $versionOutput" }
+          $version = $Matches[1]
+          if ($env:GITHUB_REF_NAME -ne "release-candidate/v$version") { throw "Candidate branch version does not match xs --version $version" }
+          & $binary --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "xs --help failed" }
+          $gitVersion = (& git --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $gitVersion -notmatch '^git version \S+') { throw "Git runtime is unavailable" }
+
+          Remove-Item Env:XINGSHU_ENV -ErrorAction SilentlyContinue
+          Remove-Item Env:XINGSHU_DB -ErrorAction SilentlyContinue
+          if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { throw "LOCALAPPDATA is required for the Windows release data path check" }
+          $dataRoot = Join-Path $env:LOCALAPPDATA "Xingshu"
+          $expectedProd = [System.IO.Path]::GetFullPath((Join-Path $dataRoot "xingshu-prod.db"))
+          $expectedDev = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $dataRoot "dev") "xingshu-dev.db"))
+          if ((Test-Path -LiteralPath $expectedProd) -or (Test-Path -LiteralPath $expectedDev)) { throw "Fresh runner unexpectedly has a pre-existing XS database" }
+
+          $prodResult = & $binary db path | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $prodResult.environment -ne "prod") { throw "Release default must resolve to environment=prod" }
+          $defaultOne = [System.IO.Path]::GetFullPath([string]$prodResult.dbPath)
+          if (-not $defaultOne.Equals($expectedProd, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Windows release DB path is not LOCALAPPDATA/Xingshu/xingshu-prod.db" }
+          if (Test-Path -LiteralPath $expectedProd) { throw "xs db path created the production database file" }
+
+          $elsewhere = Join-Path $env:RUNNER_TEMP "xs-candidate-cwd"
+          New-Item -ItemType Directory -Force -Path $elsewhere | Out-Null
+          Push-Location $elsewhere
+          try { $prodElsewhere = & $binary db path | ConvertFrom-Json } finally { Pop-Location }
+          if ($prodElsewhere.environment -ne "prod" -or -not ([System.IO.Path]::GetFullPath([string]$prodElsewhere.dbPath)).Equals($expectedProd, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Release default DB path changed with CWD" }
+          if ($defaultOne -match '[\\/]\.staging[\\/]') { throw "Release default DB path points into staging" }
+
+          $env:XINGSHU_ENV = "dev"
+          $devResult = & $binary db path | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $devResult.environment -ne "dev") { throw "XINGSHU_ENV=dev must resolve to environment=dev" }
+          $actualDev = [System.IO.Path]::GetFullPath([string]$devResult.dbPath)
+          if (-not $actualDev.Equals($expectedDev, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Windows dev DB path is not LOCALAPPDATA/Xingshu/dev/xingshu-dev.db" }
+          Remove-Item Env:XINGSHU_ENV -ErrorAction SilentlyContinue
+          if ((Test-Path -LiteralPath $expectedProd) -or (Test-Path -LiteralPath $expectedDev)) { throw "xs db path created a database file" }
+
+          $smokeDb = Join-Path $env:RUNNER_TEMP "xs-candidate-smoke.db"
+          $env:XINGSHU_ENV = "prod"
+          $env:XINGSHU_DB = $smokeDb
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "xs-release-git-smoke-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          $smokeRepo = Join-Path $smokeRoot "repo-smoke"
+          New-Item -ItemType Directory -Force -Path $smokeRepo | Out-Null
+          Push-Location $smokeRepo
+          try {
+            git init --quiet
+            if ($LASTEXITCODE -ne 0) { throw "Could not initialize the synthetic Git repository" }
+            git config user.name "XS Release Smoke"
+            git config user.email "xs-release-smoke@example.invalid"
+            [System.IO.File]::WriteAllText((Join-Path $smokeRepo "README.md"), "release smoke fixture`n", [System.Text.UTF8Encoding]::new($false))
+            git add README.md
+            if ($LASTEXITCODE -ne 0) { throw "Could not stage the synthetic Git repository" }
+            git commit --quiet -m "release smoke"
+            if ($LASTEXITCODE -ne 0) { throw "Could not commit the synthetic Git repository" }
+          } finally { Pop-Location }
+          $rootAddOutput = (& $binary roots add $smokeRoot | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "xs roots add failed on the synthetic Git repository: $rootAddOutput" }
+          if ($rootAddOutput -match '^registered root (\d+)$') { $smokeRootId = $Matches[1] } else { throw "Unexpected xs roots add result: $rootAddOutput" }
+          & $binary scan --root $smokeRoot | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "xs scan failed on the synthetic Git repository" }
+          $rootRows = @(& $binary roots list | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or $rootRows.Count -ne 1 -or [string]$rootRows[0].id -ne $smokeRootId) { throw "xs roots list did not persist the smoke root" }
+          $repoRows = @(& $binary list | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or $repoRows.Count -ne 1 -or [string]$repoRows[0].root_id -ne $smokeRootId) { throw "xs scan did not persist the smoke repository" }
+          if (-not (Test-Path -LiteralPath $smokeDb)) { throw "CLI did not create the isolated smoke database" }
+
+          function Assert-SchemaV5([string]$DatabasePath) {
+            $code = "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA query_only=ON'); row=db.execute('SELECT version FROM schema_meta LIMIT 1').fetchone(); assert row == (5,), row"
+            py -3 -c $code $DatabasePath
+            if ($LASTEXITCODE -ne 0) { throw "Metadata DB schema is not version 5" }
+          }
+          function Assert-SidecarFts([string]$SidecarPath) {
+            $code = "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA query_only=ON'); row=db.execute('SELECT name FROM sqlite_master WHERE name=?', ('body_fts',)).fetchone(); assert row is not None, row"
+            py -3 -c $code $SidecarPath
+            if ($LASTEXITCODE -ne 0) { throw "FTS sidecar is missing body_fts" }
+          }
+          Assert-SchemaV5 $smokeDb
+          $indexUpdate = & $binary index update --root $smokeRootId --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $indexUpdate.summary.complete -ne $true -or $indexUpdate.summary.updated -ne 1) { throw "xs index update failed on the smoke repository" }
+          $indexStatusBefore = & $binary index status --root $smokeRootId --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $indexStatusBefore.complete -ne $true -or $indexStatusBefore.items.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$indexStatusBefore.items[0].indexedCommit) -or $indexStatusBefore.items[0].indexBytes -le 0) { throw "xs index status did not report a persisted sidecar index" }
+          $sidecarsBefore = @(Get-ChildItem -Force -Path $env:RUNNER_TEMP -Filter ".xs-search-v2-*.sqlite" -File)
+          if ($sidecarsBefore.Count -ne 1) { throw "Expected exactly one FTS sidecar for the isolated DB" }
+          $sidecarPath = $sidecarsBefore[0].FullName
+          Assert-SidecarFts $sidecarPath
+          $sidecarHashBefore = (Get-FileHash -LiteralPath $sidecarPath -Algorithm SHA256).Hash
+
+          # First stable has no older-schema migration; verify restart by replacing with this same candidate artifact.
+          $binaryHashBefore = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
+          $replacementBinary = Join-Path $env:RUNNER_TEMP "xs-release-replacement.exe"
+          Copy-Item -LiteralPath $binary -Destination $replacementBinary -Force
+          Copy-Item -LiteralPath $replacementBinary -Destination $binary -Force
+          $binaryHashAfter = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
+          if ($binaryHashAfter -ne $binaryHashBefore) { throw "Same-artifact replacement changed the candidate binary bytes" }
+
+          $rootsAfterReplace = @(& $binary roots list | ConvertFrom-Json)
+          $reposAfterReplace = @(& $binary list | ConvertFrom-Json)
+          $indexStatusAfter = & $binary index status --root $smokeRootId --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $rootsAfterReplace.Count -ne 1 -or [string]$rootsAfterReplace[0].id -ne $smokeRootId -or $reposAfterReplace.Count -ne 1 -or [string]$reposAfterReplace[0].root_id -ne $smokeRootId -or $indexStatusAfter.complete -ne $true -or $indexStatusAfter.items.Count -ne 1 -or $indexStatusAfter.items[0].indexedCommit -ne $indexStatusBefore.items[0].indexedCommit -or $indexStatusAfter.items[0].indexBytes -le 0) { throw "Metadata DB/sidecar did not survive same-artifact replacement" }
+          $searchAfterReplace = & $binary search "release smoke fixture" --root $smokeRootId --fixed-strings --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $searchAfterReplace.summary.source -ne "index" -or $searchAfterReplace.summary.matches -lt 1) { throw "FTS sidecar query failed after same-artifact replacement" }
+          Assert-SchemaV5 $smokeDb
+          Assert-SidecarFts $sidecarPath
+          $sidecarHashAfter = (Get-FileHash -LiteralPath $sidecarPath -Algorithm SHA256).Hash
+          if ($sidecarHashAfter -ne $sidecarHashBefore) { throw "FTS sidecar changed after read-only restart checks" }
+
+          $stage = Join-Path $env:RUNNER_TEMP "xs-candidate-stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $stage "xs.exe")
+          Copy-Item -LiteralPath "LICENSE" -Destination (Join-Path $stage "LICENSE")
+          $asset = "xingshu-v$version-$env:RUST_TARGET.zip"
+          $assetPath = Join-Path $env:RUNNER_TEMP $asset
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $assetPath -Force
+          $hash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumPath = "$assetPath.sha256"
+          [System.IO.File]::WriteAllText($checksumPath, "${hash}  ${asset}`n", [System.Text.ASCIIEncoding]::new())
+          $manifestPath = Join-Path $env:RUNNER_TEMP "xingshu-v$version-$env:RUST_TARGET.manifest.json"
+          $manifest = [ordered]@{
+            schemaVersion = 1
+            sourceRepository = $env:GITHUB_REPOSITORY
+            sourceCommit = $env:GITHUB_SHA
+            candidateRunId = $env:GITHUB_RUN_ID
+            candidateRunAttempt = $env:GITHUB_RUN_ATTEMPT
+            version = $version
+            target = $env:RUST_TARGET
+            assetName = $asset
+            assetSha256 = $hash
+            minimumOsAbi = "Windows 10+"
+            buildRunner = $env:BUILD_RUNNER
+            crtLinkage = "static"
+            runtimeDependencies = @("Git executable on PATH", "Windows 10+")
+            gitVersion = $gitVersion
+            buildChannel = "release"
+            signatureStatus = "unsigned"
+          }
+          [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 4 -Compress) + "`n", [System.Text.UTF8Encoding]::new($false))
+          "asset=$asset"
+          "version=$version"
+          "sha256=$hash"
+          "manifest=$manifestPath"
+      - name: Upload immutable Windows candidate artifact
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: xingshu-candidate-${{ matrix.target }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/xingshu-v*-${{ matrix.target }}.zip
+            ${{ runner.temp }}/xingshu-v*-${{ matrix.target }}.zip.sha256
+            ${{ runner.temp }}/xingshu-v*-${{ matrix.target }}.manifest.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+      - name: Smoke test and package Linux CLI
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$CARGO_TARGET_DIR/$RUST_TARGET/release/xs"
+          test -x "$binary"
+          version="$($binary --version | awk '{print $NF}')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          [[ "$GITHUB_REF_NAME" == "release-candidate/v${version}" ]]
+          "$binary" --help >/dev/null
+          git_version="$(git --version)"
+           ldd_output="$(ldd "$binary")"
+           if grep -Fq 'not found' <<<"$ldd_output"; then
+             echo "::error::Linux release binary has an unresolved shared-library dependency."
+             printf '%s\n' "$ldd_output"
+             exit 1
+           fi
+           mapfile -t dynamic_libraries < <(
+             awk '/=>/ { if ($2 != "not") print $1; next } $1 ~ /^\// { n=$1; sub(/^.*\//, "", n); print n }' <<<"$ldd_output" \
+               | grep -v '^linux-vdso' \
+               | sort -u
+           )
+           [[ ${#dynamic_libraries[@]} -gt 0 ]]
+           dynamic_libraries_json="$(printf '%s\n' "${dynamic_libraries[@]}" | jq -R . | jq -s -c .)"
+          [[ "$git_version" =~ ^git[[:space:]]version[[:space:]]+[^[:space:]]+ ]]
+
+          unset XINGSHU_ENV XINGSHU_DB
+          data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+          data_root="$data_home/xingshu"
+          expected_prod="$(realpath -m "$data_root/xingshu-prod.db")"
+          expected_dev="$(realpath -m "$data_root/dev/xingshu-dev.db")"
+          [[ ! -e "$expected_prod" && ! -e "$expected_dev" ]]
+
+          prod_json="$($binary db path)"
+          [[ "$(jq -r '.environment' <<<"$prod_json")" == "prod" ]]
+          default_one="$(jq -r '.dbPath' <<<"$prod_json")"
+          [[ "$(realpath -m "$default_one")" == "$expected_prod" ]]
+          [[ ! -e "$expected_prod" ]]
+          elsewhere="$RUNNER_TEMP/xs-candidate-cwd"
+          mkdir -p "$elsewhere"
+          prod_elsewhere_json="$(cd "$elsewhere" && "$binary" db path)"
+          default_two="$(jq -r '.dbPath' <<<"$prod_elsewhere_json")"
+          [[ "$(jq -r '.environment' <<<"$prod_elsewhere_json")" == "prod" ]]
+          [[ "$(realpath -m "$default_two")" == "$expected_prod" ]]
+          [[ "$default_one" != *"/.staging/"* ]]
+
+          dev_json="$(XINGSHU_ENV=dev "$binary" db path)"
+          [[ "$(jq -r '.environment' <<<"$dev_json")" == "dev" ]]
+          actual_dev="$(jq -r '.dbPath' <<<"$dev_json")"
+          [[ "$(realpath -m "$actual_dev")" == "$expected_dev" ]]
+          [[ ! -e "$expected_prod" && ! -e "$expected_dev" ]]
+
+          smoke_db="$RUNNER_TEMP/xs-candidate-smoke.db"
+          smoke_root="$RUNNER_TEMP/xs-release-git-smoke-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          smoke_repo="$smoke_root/repo-smoke"
+          mkdir -p "$smoke_repo"
+          git -C "$smoke_repo" init --quiet
+          git -C "$smoke_repo" config user.name "XS Release Smoke"
+          git -C "$smoke_repo" config user.email "xs-release-smoke@example.invalid"
+          printf 'release smoke fixture\n' > "$smoke_repo/README.md"
+          git -C "$smoke_repo" add README.md
+          git -C "$smoke_repo" commit --quiet -m "release smoke"
+
+          root_add_output="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" roots add "$smoke_root")"
+          [[ "$root_add_output" =~ ^registered[[:space:]]root[[:space:]]([0-9]+)$ ]]
+          smoke_root_id="${BASH_REMATCH[1]}"
+          XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" scan --root "$smoke_root" >/dev/null
+          roots_json="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" roots list)"
+          repos_json="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" list)"
+          [[ "$(jq 'length' <<<"$roots_json")" -eq 1 ]]
+          [[ "$(jq -r '.[0].id' <<<"$roots_json")" == "$smoke_root_id" ]]
+          [[ "$(jq 'length' <<<"$repos_json")" -eq 1 ]]
+          [[ "$(jq -r '.[0].root_id' <<<"$repos_json")" == "$smoke_root_id" ]]
+          [[ -f "$smoke_db" ]]
+
+          assert_schema_v5() {
+            python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("PRAGMA query_only=ON"); row=db.execute("SELECT version FROM schema_meta LIMIT 1").fetchone(); assert row == (5,), row' "$1"
+          }
+          assert_sidecar_fts() {
+            python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("PRAGMA query_only=ON"); row=db.execute("SELECT name FROM sqlite_master WHERE name=?", ("body_fts",)).fetchone(); assert row is not None, row' "$1"
+          }
+          assert_schema_v5 "$smoke_db"
+          index_update="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" index update --root "$smoke_root_id" --json)"
+          [[ "$(jq -r '.summary.complete' <<<"$index_update")" == "true" ]]
+          [[ "$(jq -r '.summary.updated' <<<"$index_update")" -eq 1 ]]
+          index_status_before="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" index status --root "$smoke_root_id" --json)"
+          [[ "$(jq -r '.complete' <<<"$index_status_before")" == "true" ]]
+          [[ "$(jq -r '.items | length' <<<"$index_status_before")" -eq 1 ]]
+          indexed_commit_before="$(jq -r '.items[0].indexedCommit // empty' <<<"$index_status_before")"
+          [[ -n "$indexed_commit_before" ]]
+          [[ "$(jq -r '.items[0].indexBytes' <<<"$index_status_before")" -gt 0 ]]
+          mapfile -t sidecars_before < <(find "$RUNNER_TEMP" -maxdepth 1 -type f -name '.xs-search-v2-*.sqlite' -print)
+          [[ ${#sidecars_before[@]} -eq 1 ]]
+          sidecar_path="${sidecars_before[0]}"
+          assert_sidecar_fts "$sidecar_path"
+          sidecar_hash_before="$(sha256sum "$sidecar_path" | awk '{print $1}')"
+
+          # First stable has no older-schema migration; verify restart by replacing with this same candidate artifact.
+          binary_hash_before="$(sha256sum "$binary" | awk '{print $1}')"
+          replacement_binary="$RUNNER_TEMP/xs-release-replacement-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cp "$binary" "$replacement_binary"
+          chmod +x "$replacement_binary"
+          cp "$replacement_binary" "$binary"
+          chmod +x "$binary"
+          [[ "$(sha256sum "$binary" | awk '{print $1}')" == "$binary_hash_before" ]]
+
+          roots_after_replace="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" roots list)"
+          repos_after_replace="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" list)"
+          index_status_after="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" index status --root "$smoke_root_id" --json)"
+          [[ "$(jq 'length' <<<"$roots_after_replace")" -eq 1 ]]
+          [[ "$(jq -r '.[0].id' <<<"$roots_after_replace")" == "$smoke_root_id" ]]
+          [[ "$(jq 'length' <<<"$repos_after_replace")" -eq 1 ]]
+          [[ "$(jq -r '.[0].root_id' <<<"$repos_after_replace")" == "$smoke_root_id" ]]
+          [[ "$(jq -r '.complete' <<<"$index_status_after")" == "true" ]]
+          [[ "$(jq -r '.items[0].indexedCommit // empty' <<<"$index_status_after")" == "$indexed_commit_before" ]]
+          [[ "$(jq -r '.items[0].indexBytes' <<<"$index_status_after")" -gt 0 ]]
+          search_after_replace="$(XINGSHU_ENV=prod XINGSHU_DB="$smoke_db" "$binary" search "release smoke fixture" --root "$smoke_root_id" --fixed-strings --json)"
+          [[ "$(jq -r '.summary.source' <<<"$search_after_replace")" == "index" ]]
+          [[ "$(jq -r '.summary.matches' <<<"$search_after_replace")" -ge 1 ]]
+          assert_schema_v5 "$smoke_db"
+          assert_sidecar_fts "$sidecar_path"
+          [[ "$(sha256sum "$sidecar_path" | awk '{print $1}')" == "$sidecar_hash_before" ]]
+
+          stage="$RUNNER_TEMP/xs-candidate-stage"
+          mkdir -p "$stage"
+          cp "$binary" "$stage/xs"
+          cp LICENSE "$stage/LICENSE"
+          asset="xingshu-v${version}-${RUST_TARGET}.tar.gz"
+          asset_path="$RUNNER_TEMP/$asset"
+          tar -czf "$asset_path" -C "$stage" xs LICENSE
+          hash="$(sha256sum "$asset_path" | awk '{print $1}')"
+          checksum_path="$asset_path.sha256"
+          printf '%s  %s\n' "$hash" "$asset" > "$checksum_path"
+          manifest_path="$RUNNER_TEMP/xingshu-v${version}-${RUST_TARGET}.manifest.json"
+          MANIFEST_PATH="$manifest_path" ASSET_NAME="$asset" ASSET_HASH="$hash" VERSION="$version" TARGET="$RUST_TARGET" GIT_VERSION="$git_version" DYNAMIC_LIBRARIES_JSON="$dynamic_libraries_json" node --input-type=module -e '
+          import fs from "node:fs";
+          const manifest = {
+            schemaVersion: 1,
+            sourceRepository: process.env.GITHUB_REPOSITORY,
+            sourceCommit: process.env.GITHUB_SHA,
+            candidateRunId: process.env.GITHUB_RUN_ID,
+            candidateRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            version: process.env.VERSION,
+            target: process.env.TARGET,
+            assetName: process.env.ASSET_NAME,
+            assetSha256: process.env.ASSET_HASH,
+            minimumOsAbi: "glibc 2.35+",
+            buildRunner: process.env.BUILD_RUNNER,
+            crtLinkage: "dynamic-glibc",
+            dynamicLibraries: JSON.parse(process.env.DYNAMIC_LIBRARIES_JSON),
+             runtimeDependencies: ["Git executable on PATH", "glibc 2.35+", ...JSON.parse(process.env.DYNAMIC_LIBRARIES_JSON)],
+            gitVersion: process.env.GIT_VERSION,
+            buildChannel: "release",
+            signatureStatus: "unsigned",
+          };
+          fs.writeFileSync(process.env.MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8" });
+          '
+          printf 'asset=%s\nversion=%s\nsha256=%s\nmanifest=%s\n' "$asset" "$version" "$hash" "$manifest_path"
+      - name: Upload immutable Linux candidate artifact
+        if: matrix.os == 'linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: xingshu-candidate-${{ matrix.target }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/xingshu-v*-${{ matrix.target }}.tar.gz
+            ${{ runner.temp }}/xingshu-v*-${{ matrix.target }}.tar.gz.sha256
+            ${{ runner.temp }}/xingshu-v*-${{ matrix.target }}.manifest.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  macos-build-only:
+    name: Experimental macOS build (not published)
+    needs: validate
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/xingshu-macos-build-only-${{ matrix.target }}-${{ github.run_id }}
+      RUST_TARGET: ${{ matrix.target }}
+      XINGSHU_CLI_BUILD_CHANNEL: release
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install Rust toolchain without cache
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          version: 2026.10.21
+          install_args: rust
+          cache: false
+      - name: Add target and build (no artifact upload)
+        run: |
+          rustup target add "$RUST_TARGET"
+          cargo build --locked --release -p xingshu-cli --target "$RUST_TARGET"
+      - name: Smoke test experimental binary only
+        run: |
+          binary="$CARGO_TARGET_DIR/$RUST_TARGET/release/xs"
+          "$binary" --version
+          "$binary" --help
+          git --version
+          echo "Experimental macOS binary is not uploaded or declared supported until signing/notarization is approved."

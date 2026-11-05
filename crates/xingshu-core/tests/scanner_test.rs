@@ -187,7 +187,7 @@ fn scanner_prioritizes_upstream_remote_over_my_org_classification_for_forks() {
 }
 
 #[test]
-fn dirty_repository_requires_interactive_decision_and_aborts_unattended() {
+fn dirty_repository_requires_interactive_decision_and_skips_unattended() {
     let temp = TempDir::new().expect("temp dir");
     let root = temp.path().join("root");
     let repo_path = create_repo(&root, "dirty");
@@ -207,6 +207,104 @@ fn dirty_repository_requires_interactive_decision_and_aborts_unattended() {
     let error =
         pull_repo(&repo_path, &repo, &policy, PullMode::Interactive).expect_err("must stop");
     assert!(matches!(error, VcsError::ConflictNeedsDecision(_)));
-    let outcome = pull_repo(&repo_path, &repo, &policy, PullMode::Unattended).expect("must abort");
-    assert_eq!(outcome.result, "aborted");
+    let outcome = pull_repo(&repo_path, &repo, &policy, PullMode::Unattended).expect("must skip");
+    assert_eq!(outcome.result, "skipped");
+}
+
+#[test]
+fn incremental_scan_skips_unchanged_repositories() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path().join("root");
+    let repo_path = create_repo(&root, "keep");
+    let database = Database::open(temp.path().join("index.db")).expect("open database");
+    let root_id = database.upsert_root(&root_for(&root)).expect("insert root");
+    let mut registered = root_for(&root);
+    registered.id = Some(root_id);
+
+    let first =
+        scan_roots(&database, &[registered.clone()], &ScanOptions::default()).expect("first scan");
+    assert_eq!(first.repos_found, 1);
+    assert_eq!(first.unchanged_repos, 0);
+
+    let second =
+        scan_roots(&database, &[registered.clone()], &ScanOptions::default()).expect("second scan");
+    assert_eq!(second.repos_found, 1);
+    assert_eq!(second.unchanged_repos, 1);
+
+    // A git-level change invalidates the fingerprint.
+    fs::write(repo_path.join("README.md"), "changed\n").expect("change fixture");
+    run_git(&repo_path, &["add", "README.md"]);
+    run_git(&repo_path, &["commit", "-q", "-m", "change"]);
+    let third = scan_roots(&database, &[registered], &ScanOptions::default()).expect("third scan");
+    assert_eq!(third.unchanged_repos, 0);
+    let repo = database.list_repos().expect("repos").pop().expect("repo");
+    assert!(repo.scan_fingerprint.is_some());
+    assert!(!repo.dirty);
+}
+
+#[test]
+fn scanner_records_remote_host_namespace_and_working_state() {
+    let temp = TempDir::new().expect("temp dir");
+    let root_a = temp.path().join("root-a");
+    let root_b = temp.path().join("root-b");
+    let repo_a = create_repo(&root_a, "bar");
+    run_git(
+        &repo_a,
+        &["remote", "add", "origin", "git@github.com:foo/bar.git"],
+    );
+    let repo_b = create_repo(&root_b, "bar");
+    run_git(
+        &repo_b,
+        &["remote", "add", "origin", "https://gitlab.com/foo/bar.git"],
+    );
+    fs::write(repo_b.join("dirty.txt"), "x\n").expect("dirty fixture");
+
+    let database = Database::open(temp.path().join("index.db")).expect("open database");
+    let id_a = database.upsert_root(&root_for(&root_a)).expect("root a");
+    let mut registered_a = root_for(&root_a);
+    registered_a.id = Some(id_a);
+    let mut root_b_record = root_for(&root_b);
+    root_b_record.name = "fixture-b".to_owned();
+    let id_b = database.upsert_root(&root_b_record).expect("root b");
+    let mut registered_b = root_b_record;
+    registered_b.id = Some(id_b);
+
+    scan_roots(
+        &database,
+        &[registered_a, registered_b],
+        &ScanOptions::default(),
+    )
+    .expect("scan");
+
+    let repos = database.list_repos().expect("repos");
+    let github = repos
+        .iter()
+        .find(|repo| repo.remote_host.as_deref() == Some("github.com"))
+        .expect("github repo");
+    assert_eq!(github.remote_namespace.as_deref(), Some("foo"));
+    assert_eq!(github.org, "foo");
+    assert_eq!(github.name, "bar");
+    assert_eq!(github.org_source.as_deref(), Some("remote"));
+    assert!(!github.dirty);
+    assert!(github.status_checked_at.is_some());
+
+    let gitlab = repos
+        .iter()
+        .find(|repo| repo.remote_host.as_deref() == Some("gitlab.com"))
+        .expect("gitlab repo");
+    assert!(gitlab.dirty);
+    assert_eq!(gitlab.ahead, 0);
+    assert_eq!(gitlab.behind, 0);
+
+    // Host-qualified lookup disambiguates identical org/name across hosts.
+    let found = database
+        .find_repo("github.com/foo/bar")
+        .expect("find github")
+        .expect("github repo");
+    assert_eq!(found.remote_host.as_deref(), Some("github.com"));
+    let found = database
+        .find_repo("gitlab.com/foo/bar")
+        .expect("find gitlab")
+        .expect("gitlab repo");
+    assert_eq!(found.remote_host.as_deref(), Some("gitlab.com"));
 }

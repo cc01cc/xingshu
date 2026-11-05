@@ -12,7 +12,7 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, HeaderValue, Request, StatusCode, header::CONTENT_TYPE},
     middleware::{self, Next},
     response::{
@@ -95,6 +95,7 @@ fn build_router(db_path: PathBuf) -> Router {
         )
         .route("/api/v1/roots", get(roots).post(create_root))
         .route("/api/v1/roots/{root_id}", delete(delete_root))
+        .route("/api/v1/roots/{root_id}/space", get(root_space))
         .route("/api/v1/tags", get(tags).post(create_tag))
         .route("/api/v1/tags/{tag_id}", delete(delete_tag))
         .route("/api/v1/scan", post(trigger_scan))
@@ -109,6 +110,17 @@ fn build_router(db_path: PathBuf) -> Router {
         .route("/api/v1/stats", get(stats))
         .route("/api/v1/repos/{repo_id}/fetch_log", get(fetch_logs))
         .route("/api/v1/repos/{repo_id}/move", post(move_repo_handler))
+        .route("/api/v1/repos/{repo_id}/status", get(repo_status))
+        .route("/api/v1/repos/{repo_id}/diff", get(repo_diff))
+        .route(
+            "/api/v1/repos/{repo_id}/backups",
+            get(backup_list).post(backup_create),
+        )
+        .route(
+            "/api/v1/repos/{repo_id}/backups/restore",
+            post(backup_restore),
+        )
+        .route("/api/v1/repos/{repo_id}/backups/prune", post(backup_prune))
         .route("/api/v1/open", post(open_path))
         .route(
             "/api/v1/repos/{repo_id}/policy",
@@ -145,8 +157,10 @@ fn init_logging() {
     } else {
         let _ = tracing_subscriber::fmt()
             .json()
+            .with_ansi(false)
             .with_target(true)
             .with_env_filter(filter)
+            .with_writer(std::io::stderr)
             .try_init();
     }
 }
@@ -263,6 +277,28 @@ async fn delete_root(State(state): State<AppState>, Path(root_id): Path<i64>) ->
     }) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error_response(error.to_string()),
+    }
+}
+
+async fn root_space(State(state): State<AppState>, Path(root_id): Path<i64>) -> impl IntoResponse {
+    let result = (|| -> anyhow::Result<serde_json::Value> {
+        let db = Database::open(&state.db_path)?;
+        let root = db
+            .find_root_by_id(root_id)?
+            .ok_or_else(|| anyhow::anyhow!("root not found"))?;
+        let available = xingshu_core::mover::available_space(&root.path)
+            .map_err(|error| anyhow::anyhow!("space_probe_failed: {error}"))?;
+        Ok(json!({ "rootId": root_id, "availableBytes": available }))
+    })();
+    match result {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => {
+            let detail = error.to_string();
+            if detail.contains("space_probe_failed") {
+                return problem_response(StatusCode::BAD_GATEWAY, "space_probe_failed", &detail);
+            }
+            response_for_anyhow(&error)
+        }
     }
 }
 
@@ -385,7 +421,7 @@ async fn pull_decision(
             return problem_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_conflict_action",
-                "action must be backup, overwrite, or abort",
+                "action must be backup, overwrite, or skip",
             );
         }
         Ok(action) => action,
@@ -422,6 +458,334 @@ async fn pull_decision(
         Ok(outcome) => (
             StatusCode::OK,
             Json(json!({ "result": outcome.result, "backupPath": outcome.backup_path })),
+        )
+            .into_response(),
+        Err(error) => response_for_anyhow(&error),
+    }
+}
+
+/// Resolve the on-disk directory of a repository (PLAN-0314).
+fn repo_dir(db: &Database, repo_id: i64) -> anyhow::Result<PathBuf> {
+    let repo = db
+        .find_repo_by_id(repo_id)?
+        .ok_or_else(|| anyhow::anyhow!("repository not found"))?;
+    let roots = db.list_roots()?;
+    let root = roots
+        .iter()
+        .find(|root| root.id == Some(repo.root_id))
+        .ok_or_else(|| anyhow::anyhow!("root not found"))?;
+    Ok(root.path.join(&repo.rel_path))
+}
+
+/// Remote drift state for one repository, via read-only `git ls-remote`.
+fn remote_drift(path: &std::path::Path, default_branch: Option<&str>) -> serde_json::Value {
+    match xingshu_core::git::remote_refs(path, "origin") {
+        Ok(refs) => {
+            let Some(branch) = default_branch else {
+                return json!({
+                    "state": "unknown",
+                    "detail": format!("{} remote branches (unknown default branch)", refs.len())
+                });
+            };
+            let Some((_, remote_sha)) = refs
+                .iter()
+                .find(|(name, _)| name == &format!("refs/heads/{branch}"))
+            else {
+                return json!({
+                    "state": "unknown",
+                    "detail": format!("{} remote branches (default branch not advertised)", refs.len())
+                });
+            };
+            let local = xingshu_core::git::run_git(
+                path,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/remotes/origin/{branch}"),
+                ],
+            )
+            .ok()
+            .map(|output| output.stdout.trim().to_owned());
+            match local {
+                Some(local_sha) if &local_sha == remote_sha => {
+                    json!({ "state": "up-to-date", "branch": branch })
+                }
+                Some(_) => json!({
+                    "state": "changed",
+                    "branch": branch,
+                    "detail": "remote moved; fetch/pull needed"
+                }),
+                None => json!({
+                    "state": "unknown",
+                    "detail": "no local tracking ref; needs fetch"
+                }),
+            }
+        }
+        Err(error) => json!({ "state": "unknown", "detail": error.to_string() }),
+    }
+}
+
+async fn repo_status(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    Query(query): Query<StatusQuery>,
+) -> impl IntoResponse {
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        let repo = db
+            .find_repo_by_id(repo_id)?
+            .ok_or_else(|| anyhow::anyhow!("repository not found"))?;
+        let remote = if query.remote.unwrap_or(false) {
+            let path = repo_dir(&db, repo_id)?;
+            Some(remote_drift(&path, repo.default_branch.as_deref()))
+        } else {
+            None
+        };
+        Ok(json!({
+            "dirty": repo.dirty,
+            "ahead": repo.ahead,
+            "behind": repo.behind,
+            "statusCheckedAt": repo.status_checked_at.map(|time| time.to_rfc3339()),
+            "remote": remote,
+        }))
+    })();
+    match result {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => response_for_anyhow(&error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StatusQuery {
+    #[serde(rename = "remote")]
+    remote: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiffQuery {
+    path: String,
+}
+
+async fn repo_diff(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    Query(query): Query<DiffQuery>,
+) -> impl IntoResponse {
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        db.find_repo_by_id(repo_id)?
+            .ok_or_else(|| anyhow::anyhow!("repository not found"))?;
+        let dir = repo_dir(&db, repo_id)?;
+        if xingshu_core::git::is_bare_layout(&dir) {
+            anyhow::bail!("invalid repository: bare layout has no worktree diff");
+        }
+        let relative = sanitize_repo_relative(&dir, &query.path)?;
+        let diff = xingshu_core::git::diff_text(&dir, &relative)?;
+        let kind = match diff.kind {
+            xingshu_core::git::DiffKind::Diff => "diff",
+            xingshu_core::git::DiffKind::Binary => "binary",
+            xingshu_core::git::DiffKind::Untracked => "untracked",
+            xingshu_core::git::DiffKind::NoHead => "no_head",
+        };
+        Ok(json!({
+            "path": relative,
+            "kind": kind,
+            "patch": diff.patch,
+            "truncated": diff.truncated,
+        }))
+    })();
+    match result {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => response_for_anyhow(&error),
+    }
+}
+
+fn sanitize_repo_relative(dir: &std::path::Path, raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("invalid path: empty");
+    }
+    let candidate = std::path::Path::new(trimmed);
+    if candidate.is_absolute() {
+        anyhow::bail!("invalid path: absolute paths are rejected");
+    }
+    let mut relative = String::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                if !relative.is_empty() {
+                    relative.push('/');
+                }
+                relative.push_str(&part.to_string_lossy());
+            }
+            std::path::Component::CurDir => {}
+            _ => anyhow::bail!("invalid path: {trimmed}"),
+        }
+    }
+    if relative.is_empty() {
+        anyhow::bail!("invalid path: {trimmed}");
+    }
+    let base = dir
+        .canonicalize()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let target = dir.join(&relative);
+    let anchor = match target.canonicalize() {
+        Ok(path) => path,
+        Err(_) => target
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| dir.to_path_buf())
+            .canonicalize()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+    };
+    if !path_inside(&base, &anchor) {
+        anyhow::bail!("invalid path: outside repository");
+    }
+    Ok(relative)
+}
+
+fn path_inside(base: &std::path::Path, candidate: &std::path::Path) -> bool {
+    let normalize = |path: &std::path::Path| {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    let base = normalize(base);
+    let candidate = normalize(candidate);
+    candidate == base || candidate.starts_with(&format!("{base}/"))
+}
+
+async fn backup_list(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    Query(query): Query<BackupDestQuery>,
+) -> impl IntoResponse {
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        let path = repo_dir(&db, repo_id)?;
+        let dest = query.dest.as_deref().map(std::path::Path::new);
+        xingshu_core::backup::list_backups(&path, dest).map_err(anyhow::Error::new)
+    })()
+    .and_then(|entries| {
+        serde_json::to_value(entries)
+            .map_err(|error| anyhow::anyhow!("serialization failed: {error}"))
+    });
+    match result {
+        Ok(value) => (StatusCode::OK, Json(camelize_value(value))).into_response(),
+        Err(error) => response_for_anyhow(&error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BackupDestQuery {
+    dest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackupCreateRequest {
+    dest: Option<String>,
+    archive: Option<String>,
+    keep: Option<u32>,
+}
+
+async fn backup_create(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    Json(request): Json<BackupCreateRequest>,
+) -> impl IntoResponse {
+    if let Some(archive) = request.archive.as_deref()
+        && archive != "tar.gz"
+        && archive != "tar.zst"
+    {
+        return problem_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_archive_format",
+            "archive must be tar.gz or tar.zst",
+        );
+    }
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        let path = repo_dir(&db, repo_id)?;
+        let dest = request.dest.as_ref().map(std::path::PathBuf::from);
+        xingshu_core::backup::create_backup(
+            &path,
+            dest.as_deref(),
+            request.archive.as_deref(),
+            request.keep.unwrap_or(5) as usize,
+        )
+        .map_err(anyhow::Error::new)
+    })();
+    match result {
+        Ok(created) => (
+            StatusCode::CREATED,
+            Json(json!({ "path": created.to_string_lossy() })),
+        )
+            .into_response(),
+        Err(error) => response_for_anyhow(&error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BackupRestoreRequest {
+    path: String,
+    #[serde(rename = "confirm")]
+    confirm: Option<bool>,
+}
+
+async fn backup_restore(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    Json(request): Json<BackupRestoreRequest>,
+) -> impl IntoResponse {
+    if request.confirm != Some(true) {
+        return problem_response(
+            StatusCode::BAD_REQUEST,
+            "confirm_required",
+            "restore overwrites the repository; send confirm=true to proceed",
+        );
+    }
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        let path = repo_dir(&db, repo_id)?;
+        xingshu_core::backup::restore_backup(&path, std::path::Path::new(&request.path))
+            .map_err(anyhow::Error::new)
+    })();
+    match result {
+        Ok(()) => (StatusCode::OK, Json(json!({ "restored": true }))).into_response(),
+        Err(error) => response_for_anyhow(&error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BackupPruneRequest {
+    keep: u32,
+    #[serde(rename = "dryRun")]
+    dry_run: Option<bool>,
+    dest: Option<String>,
+}
+
+async fn backup_prune(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+    Json(request): Json<BackupPruneRequest>,
+) -> impl IntoResponse {
+    let result = (|| {
+        let db = Database::open(&state.db_path)?;
+        let path = repo_dir(&db, repo_id)?;
+        let dest = request.dest.as_ref().map(std::path::PathBuf::from);
+        let execute = !request.dry_run.unwrap_or(true);
+        xingshu_core::backup::prune_backups(&path, dest.as_deref(), request.keep as usize, execute)
+            .map_err(anyhow::Error::new)
+    })();
+    let executed = !request.dry_run.unwrap_or(true);
+    match result {
+        Ok(affected) => (
+            StatusCode::OK,
+            Json(json!({
+            "executed": executed,
+                "affected": affected.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>(),
+            })),
         )
             .into_response(),
         Err(error) => response_for_anyhow(&error),
@@ -584,7 +948,7 @@ async fn task_conflicts(State(state): State<AppState>, Path(task_id): Path<Strin
                         .conflict_json
                         .as_deref()
                         .and_then(|json| serde_json::from_str(json).ok()),
-                    allowed_actions: vec!["backup", "overwrite", "abort"],
+                    allowed_actions: vec!["backup", "overwrite", "skip"],
                     requested_action: record.requested_action,
                     result: record.result,
                     duration_ms: record.duration_ms,
@@ -615,7 +979,7 @@ async fn task_repo_decision(
             return problem_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_conflict_action",
-                "action must be backup, overwrite, or abort",
+                "action must be backup, overwrite, or skip",
             );
         }
         Ok(action) => action,
@@ -727,8 +1091,8 @@ fn resolve_task_repo_decision(
     let duration_ms = started.elapsed().as_millis() as u64;
     match action_result {
         Ok(outcome) => {
-            let status = if outcome.result == "aborted" {
-                "aborted"
+            let status = if outcome.result == "skipped" {
+                "skipped"
             } else {
                 "completed"
             };
@@ -762,6 +1126,16 @@ fn resolve_task_repo_decision(
                 VcsError::ConflictNeedsDecision(info) => info.as_deref().cloned(),
                 _ => None,
             };
+            if matches!(action, PullConflictAction::Backup) {
+                let log = xingshu_core::puller::make_failed_fetch_log(
+                    repo_id,
+                    &policy.pull_strategy,
+                    "backup_failed",
+                    &error.to_string(),
+                );
+                let _ = database.record_fetch_log(&log);
+                let _ = database.update_pull_status(repo_id, "backup_failed");
+            }
             let update = TaskRepoUpdate {
                 status: "failed".to_owned(),
                 conflict_reason: task_repo.conflict_reason,
@@ -836,7 +1210,7 @@ async fn task_stream(
     };
     let initial_stream = tokio_stream::once(Ok::<Event, Infallible>(initial));
     let event_stream = BroadcastStream::new(receiver).filter_map(move |event| match event {
-        Ok(event) if event.sequence > last_event_id => {
+        Ok(event) if event_visible_after(last_event_id, event.sequence) => {
             Some(Ok::<Event, Infallible>(task_event_to_sse(event)))
         }
         _ => None,
@@ -867,6 +1241,11 @@ fn parse_last_event_id(headers: &HeaderMap) -> u64 {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+/// True when a broadcast event should be replayed for a resuming client.
+fn event_visible_after(last_event_id: u64, sequence: u64) -> bool {
+    sequence > last_event_id
 }
 
 fn task_to_api_value(task: TaskRecord) -> Result<serde_json::Value, serde_json::Error> {
@@ -988,8 +1367,8 @@ fn run_task(
                                         Ok(RepoPullResult {
                                             repo_id,
                                             repo_name: format!("{}/{}", repo.org, repo.name),
-                                            status: if outcome.result == "aborted" {
-                                                "aborted".to_owned()
+                                            status: if outcome.result == "skipped" {
+                                                "skipped".to_owned()
                                             } else {
                                                 "completed".to_owned()
                                             },
@@ -1004,10 +1383,7 @@ fn run_task(
                                         })
                                     }
                                     Err(error)
-                                        if matches!(
-                                            error,
-                                            VcsError::ConflictNeedsDecision(_)
-                                        ) =>
+                                        if matches!(error, VcsError::ConflictNeedsDecision(_)) =>
                                     {
                                         let conflict = match &error {
                                             VcsError::ConflictNeedsDecision(info) => {
@@ -1260,18 +1636,22 @@ async fn move_repo_handler(
 ) -> impl IntoResponse {
     let result = (|| {
         let db = Database::open(&state.db_path)?;
-        let repo = db
-            .find_repo_by_id(repo_id)?
-            .ok_or_else(|| xingshu_core::types::VcsError::Database("repository not found".to_owned()))?;
+        let repo = db.find_repo_by_id(repo_id)?.ok_or_else(|| {
+            xingshu_core::types::VcsError::Database("repository not found".to_owned())
+        })?;
         let roots = db.list_roots()?;
         let source_root = roots
             .iter()
             .find(|r| r.id == Some(repo.root_id))
-            .ok_or_else(|| xingshu_core::types::VcsError::Database("source root not found".to_owned()))?;
+            .ok_or_else(|| {
+                xingshu_core::types::VcsError::Database("source root not found".to_owned())
+            })?;
         let target_root = roots
             .iter()
             .find(|r| r.id == Some(request.target_root_id))
-            .ok_or_else(|| xingshu_core::types::VcsError::Database("target root not found".to_owned()))?;
+            .ok_or_else(|| {
+                xingshu_core::types::VcsError::Database("target root not found".to_owned())
+            })?;
         let source = source_root.path.join(&repo.rel_path);
         let dest = xingshu_core::mover::move_repo(
             &source_root.path,
@@ -1302,43 +1682,58 @@ struct PolicyRequest {
     unattended_conflict_policy: Option<String>,
 }
 
-async fn get_repo_policy(State(state): State<AppState>, Path(repo_id): Path<i64>) -> impl IntoResponse {
+async fn get_repo_policy(
+    State(state): State<AppState>,
+    Path(repo_id): Path<i64>,
+) -> impl IntoResponse {
     read_json(&state.db_path, |db| {
-        db.repo_policy(repo_id).map(|opt| opt.unwrap_or_else(|| {
-            let mut p = xingshu_core::types::Policy {
+        let repo = db.find_repo_by_id(repo_id)?.ok_or_else(|| {
+            xingshu_core::types::VcsError::Database("repository not found".to_owned())
+        })?;
+        let stored = db.repo_policy(repo_id)?;
+        let mut source = "kind-default";
+        let mut source_tag_id: Option<i64> = None;
+        if stored.is_some() {
+            source = "repo";
+        } else {
+            for tag_id in db.tag_ids_for_repo(repo_id)? {
+                if db.tag_policy(tag_id)?.is_some() {
+                    source = "tag";
+                    source_tag_id = Some(tag_id);
+                    break;
+                }
+            }
+        }
+        let effective = resolve_repo_policy(db, &repo)?;
+        let base = stored.unwrap_or_else(|| {
+            let def = xingshu_core::policy::default_for_kind(&repo.repo_kind);
+            xingshu_core::types::Policy {
                 id: None,
                 repo_id: Some(repo_id),
                 tag_id: None,
-                pull_strategy: "fetch-only".to_owned(),
+                pull_strategy: def.pull_strategy,
                 fetch_schedule: None,
                 depth: "full".to_owned(),
                 auto_tag: false,
-                pull_conflict_policy: "stop".to_owned(),
-                unattended_conflict_policy: "abort".to_owned(),
+                pull_conflict_policy: xingshu_core::policy::action_value(def.conflict_action)
+                    .to_owned(),
+                unattended_conflict_policy: xingshu_core::policy::action_value(
+                    def.unattended_action,
+                )
+                .to_owned(),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
-            };
-            // try default for kind if repo exists
-            if let Ok(Some(repo)) = db.find_repo_by_id(repo_id) {
-                let def = xingshu_core::policy::default_for_kind(&repo.repo_kind);
-                p.pull_strategy = def.pull_strategy;
-                p.pull_conflict_policy = match def.conflict_action {
-                    xingshu_core::policy::PullConflictAction::Stop => "stop",
-                    xingshu_core::policy::PullConflictAction::Backup => "backup",
-                    xingshu_core::policy::PullConflictAction::Overwrite => "overwrite",
-                    xingshu_core::policy::PullConflictAction::Abort => "abort",
-                }
-                .to_owned();
-                p.unattended_conflict_policy = match def.unattended_action {
-                    xingshu_core::policy::PullConflictAction::Stop => "stop",
-                    xingshu_core::policy::PullConflictAction::Backup => "backup",
-                    xingshu_core::policy::PullConflictAction::Overwrite => "overwrite",
-                    xingshu_core::policy::PullConflictAction::Abort => "abort",
-                }
-                .to_owned();
             }
-            p
-        }))
+        });
+        let mut value = serde_json::to_value(&base).unwrap_or_default();
+        value["source"] = json!(source);
+        value["sourceTagId"] = json!(source_tag_id);
+        value["effective"] = json!({
+            "pullStrategy": effective.pull_strategy,
+            "conflict": xingshu_core::policy::action_value(effective.conflict_action),
+            "unattended": xingshu_core::policy::action_value(effective.unattended_action),
+        });
+        Ok(value)
     })
 }
 
@@ -1350,24 +1745,46 @@ async fn set_repo_policy(
     let result = (|| {
         let db = Database::open(&state.db_path)?;
         if db.find_repo_by_id(repo_id)?.is_none() {
-            return Err(xingshu_core::types::VcsError::Database("repository not found".to_owned()));
+            return Err(xingshu_core::types::VcsError::Database(
+                "repository not found".to_owned(),
+            ));
         }
         let existing = db.repo_policy(repo_id)?;
         let pull_strategy = request
             .pull_strategy
             .or(request.pull_conflict_policy.clone())
-            .unwrap_or_else(|| existing.as_ref().map(|p| p.pull_strategy.clone()).unwrap_or_else(|| "fetch-only".to_owned()));
+            .unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|p| p.pull_strategy.clone())
+                    .unwrap_or_else(|| "fetch-only".to_owned())
+            });
         let conflict = request
             .conflict
             .or(request.pull_conflict_policy.clone())
-            .unwrap_or_else(|| existing.as_ref().map(|p| p.pull_conflict_policy.clone()).unwrap_or_else(|| "stop".to_owned()));
+            .unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|p| p.pull_conflict_policy.clone())
+                    .unwrap_or_else(|| "stop".to_owned())
+            });
         let unattended = request
             .unattended
             .or(request.unattended_conflict_policy.clone())
-            .unwrap_or_else(|| existing.as_ref().map(|p| p.unattended_conflict_policy.clone()).unwrap_or_else(|| "abort".to_owned()));
+            .unwrap_or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|p| p.unattended_conflict_policy.clone())
+                    .unwrap_or_else(|| "skip".to_owned())
+            });
         // validation
-        if !matches!(pull_strategy.as_str(), "fetch-only" | "mirror" | "no-update" | "archive") {
-            return Err(xingshu_core::types::VcsError::GitCommand(format!("invalid pull strategy: {pull_strategy}")));
+        if !matches!(
+            pull_strategy.as_str(),
+            "fetch-only" | "mirror" | "no-update" | "archive"
+        ) {
+            return Err(xingshu_core::types::VcsError::GitCommand(format!(
+                "invalid pull strategy: {pull_strategy}"
+            )));
         }
         xingshu_core::policy::PullConflictAction::try_from(conflict.as_str())?;
         xingshu_core::policy::PullConflictAction::try_from(unattended.as_str())?;
@@ -1394,7 +1811,10 @@ async fn set_repo_policy(
     }
 }
 
-async fn get_tag_policy(State(state): State<AppState>, Path(tag_id): Path<i64>) -> impl IntoResponse {
+async fn get_tag_policy(
+    State(state): State<AppState>,
+    Path(tag_id): Path<i64>,
+) -> impl IntoResponse {
     read_json(&state.db_path, |db| db.tag_policy(tag_id))
 }
 
@@ -1406,16 +1826,36 @@ async fn set_tag_policy(
     let result = (|| {
         let db = Database::open(&state.db_path)?;
         if db.find_tag_by_id(tag_id)?.is_none() {
-            return Err(xingshu_core::types::VcsError::Database("tag not found".to_owned()));
+            return Err(xingshu_core::types::VcsError::Database(
+                "tag not found".to_owned(),
+            ));
         }
         let existing = db.tag_policy(tag_id)?;
-        let pull_strategy = request
-            .pull_strategy
-            .unwrap_or_else(|| existing.as_ref().map(|p| p.pull_strategy.clone()).unwrap_or_else(|| "fetch-only".to_owned()));
-        let conflict = request.conflict.unwrap_or_else(|| existing.as_ref().map(|p| p.pull_conflict_policy.clone()).unwrap_or_else(|| "stop".to_owned()));
-        let unattended = request.unattended.unwrap_or_else(|| existing.as_ref().map(|p| p.unattended_conflict_policy.clone()).unwrap_or_else(|| "abort".to_owned()));
-        if !matches!(pull_strategy.as_str(), "fetch-only" | "mirror" | "no-update" | "archive") {
-            return Err(xingshu_core::types::VcsError::GitCommand(format!("invalid pull strategy: {pull_strategy}")));
+        let pull_strategy = request.pull_strategy.unwrap_or_else(|| {
+            existing
+                .as_ref()
+                .map(|p| p.pull_strategy.clone())
+                .unwrap_or_else(|| "fetch-only".to_owned())
+        });
+        let conflict = request.conflict.unwrap_or_else(|| {
+            existing
+                .as_ref()
+                .map(|p| p.pull_conflict_policy.clone())
+                .unwrap_or_else(|| "stop".to_owned())
+        });
+        let unattended = request.unattended.unwrap_or_else(|| {
+            existing
+                .as_ref()
+                .map(|p| p.unattended_conflict_policy.clone())
+                .unwrap_or_else(|| "skip".to_owned())
+        });
+        if !matches!(
+            pull_strategy.as_str(),
+            "fetch-only" | "mirror" | "no-update" | "archive"
+        ) {
+            return Err(xingshu_core::types::VcsError::GitCommand(format!(
+                "invalid pull strategy: {pull_strategy}"
+            )));
         }
         xingshu_core::policy::PullConflictAction::try_from(conflict.as_str())?;
         xingshu_core::policy::PullConflictAction::try_from(unattended.as_str())?;
@@ -1550,7 +1990,10 @@ struct OpenPathRequest {
     path: String,
 }
 
-async fn open_path(State(state): State<AppState>, Json(request): Json<OpenPathRequest>) -> Response {
+async fn open_path(
+    State(state): State<AppState>,
+    Json(request): Json<OpenPathRequest>,
+) -> Response {
     let requested = std::path::PathBuf::from(&request.path);
     let Ok(canonical) = requested.canonicalize() else {
         return problem_response(
@@ -1614,7 +2057,8 @@ mod tests {
     use xingshu_core::scanner::scan_roots;
     use xingshu_core::types::{Root, ScanOptions};
 
-    use super::{build_router, camelize_value, parse_last_event_id};
+    use super::{build_router, camelize_value, event_visible_after, parse_last_event_id};
+    use xingshu_core::types::{RepoKind, RepoRecord};
 
     fn git(path: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -1788,9 +2232,9 @@ mod tests {
             .expect("find task repo")
             .expect("task repo");
         match action {
-            "abort" => {
-                assert_eq!(final_repo.status, "aborted");
-                assert_eq!(final_repo.result.as_deref(), Some("aborted"));
+            "skip" => {
+                assert_eq!(final_repo.status, "skipped");
+                assert_eq!(final_repo.result.as_deref(), Some("skipped"));
                 assert!(repo_path.join("local.txt").is_file());
             }
             "overwrite" => {
@@ -1865,6 +2309,191 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).expect("problem json");
         assert_eq!(value["code"], "invalid_conflict_action");
         assert!(value["requestId"].as_str().is_some_and(|id| !id.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn status_backup_and_prune_api_contract() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("root-a");
+        let repo_path = root.join("local").join("s");
+        std::fs::create_dir_all(&repo_path).expect("repo dir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Xingshu Test"]);
+        std::fs::write(repo_path.join("README.md"), "fixture\n").expect("fixture");
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "fixture"]);
+
+        let db_path = temp.path().join("index.db");
+        let database = Database::open(&db_path).expect("database");
+        let mut root_record = Root {
+            id: None,
+            name: "fixture".to_owned(),
+            path: root.clone(),
+            disk_label: None,
+            mount_point: None,
+            priority: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let root_id = database.upsert_root(&root_record).expect("root");
+        root_record.id = Some(root_id);
+        let repo_id = database
+            .upsert_repo(&RepoRecord {
+                id: None,
+                root_id,
+                org: "local".to_owned(),
+                name: "s".to_owned(),
+                rel_path: std::path::PathBuf::from("local/s"),
+                remote_url: None,
+                remote_host: None,
+                remote_namespace: None,
+                org_source: Some("path".to_owned()),
+                default_branch: Some("main".to_owned()),
+                head_commit: None,
+                last_fetch_at: None,
+                last_pull_status: None,
+                dirty: true,
+                ahead: 2,
+                behind: 1,
+                status_checked_at: Some(Utc::now()),
+                size_bytes: 0,
+                is_bare: false,
+                clone_status: "ok".to_owned(),
+                repo_kind: RepoKind::Own,
+                modify_lock: false,
+                lock_violation: false,
+                push_protect_remote: None,
+                scan_fingerprint: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .expect("repo");
+        drop(database);
+
+        let app = build_router(db_path);
+
+        // V1 local snapshot fields
+        let request = Request::builder()
+            .uri(format!("/api/v1/repos/{repo_id}/status"))
+            .body(Body::empty())
+            .expect("status request");
+        let response = app.clone().oneshot(request).await.expect("status response");
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("status json");
+        assert_eq!(value["dirty"], serde_json::json!(true));
+        assert_eq!(value["ahead"], serde_json::json!(2));
+        assert_eq!(value["behind"], serde_json::json!(1));
+        assert!(value["statusCheckedAt"].is_string());
+        assert!(value["remote"].is_null());
+
+        // V1 no-origin repo reports unknown remote state when asked
+        let request = Request::builder()
+            .uri(format!("/api/v1/repos/{repo_id}/status?remote=true"))
+            .body(Body::empty())
+            .expect("status remote request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["remote"]["state"], "unknown");
+
+        // V3 restore without confirm is rejected
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/repos/{repo_id}/backups/restore"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "path": "whatever" }).to_string(),
+            ))
+            .expect("restore request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), 400);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["code"], "confirm_required");
+
+        // V4 prune dry-run lists, execute deletes, keep preserves newest
+        std::fs::create_dir_all(root.join("local").join("s.bak.202609101800")).expect("bak dir 1");
+        std::fs::create_dir_all(root.join("local").join("s.bak.202609110900")).expect("bak dir 2");
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/repos/{repo_id}/backups/prune"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "keep": 1 }).to_string()))
+            .expect("prune preview request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["executed"], serde_json::json!(false));
+        assert_eq!(value["affected"].as_array().expect("affected").len(), 1);
+        assert!(root.join("local").join("s.bak.202609101800").is_dir());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/repos/{repo_id}/backups/prune"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "keep": 1, "dryRun": false }).to_string(),
+            ))
+            .expect("prune execute request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value["executed"], serde_json::json!(true));
+        assert!(root.join("local").join("s.bak.202609110900").is_dir());
+        assert!(!root.join("local").join("s.bak.202609101800").exists());
+
+        // backups list reports the remaining newest backup
+        let request = Request::builder()
+            .uri(format!("/api/v1/repos/{repo_id}/backups"))
+            .body(Body::empty())
+            .expect("backups list request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(value.as_array().expect("list").len(), 1);
+        assert_eq!(
+            value[0]["path"],
+            serde_json::json!(
+                root.join("local")
+                    .join("s.bak.202609110900")
+                    .to_string_lossy()
+            )
+        );
+
+        // repository not found → 404
+        let request = Request::builder()
+            .uri("/api/v1/repos/999/status")
+            .body(Body::empty())
+            .expect("404 request");
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), 404);
     }
 
     #[test]
@@ -2020,7 +2649,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_api_applies_all_conflict_decisions_to_the_selected_repo() {
-        for action in ["backup", "overwrite", "abort"] {
+        for action in ["backup", "overwrite", "skip"] {
             exercise_task_conflict_decision(action).await;
         }
     }
@@ -2034,20 +2663,322 @@ mod tests {
         headers.insert("last-event-id", "42".parse().expect("header value"));
         assert_eq!(parse_last_event_id(&headers), 42);
         let mut bad = HeaderMap::new();
-        bad.insert("last-event-id", "not-a-number".parse().expect("header value"));
+        bad.insert(
+            "last-event-id",
+            "not-a-number".parse().expect("header value"),
+        );
         assert_eq!(parse_last_event_id(&bad), 0);
     }
 
     #[test]
     fn last_event_id_suppresses_already_seen_sequences() {
-        // Stream filter contract: snapshot is always sent; only broadcast
-        // events with sequence > last_event_id are replayed.
-        let last_event_id = 7u64;
-        let sequences = [5u64, 7, 8, 42];
-        let replayed = sequences
+        // Stream filter contract: snapshot is always sent; only events with
+        // sequence > last_event_id pass the shared `event_visible_after` gate.
+        assert!(!event_visible_after(7, 5));
+        assert!(!event_visible_after(7, 7));
+        assert!(event_visible_after(7, 8));
+        assert!(event_visible_after(7, 42));
+        assert!(event_visible_after(0, 1));
+    }
+
+    #[tokio::test]
+    async fn diff_api_contract_reads_worktree_and_rejects_unsafe_paths() {
+        let temp = TempDir::new().expect("temp dir");
+        let database_path = temp.path().join("index.db");
+        let database = Database::open(&database_path).expect("database");
+        let (repo_id, repo_path) = setup_dirty_repo(&temp, &database);
+        fs::write(repo_path.join("README.md"), "seed\ntracked change\n").expect("modify tracked");
+        drop(database);
+
+        let status_before = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["status", "--porcelain"])
+            .output()
+            .expect("status before");
+
+        let app = build_router(database_path);
+        let get = |uri: String| {
+            let app = app.clone();
+            async move {
+                let request = Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("diff request");
+                app.oneshot(request).await.expect("diff response")
+            }
+        };
+
+        let response = get(format!("/api/v1/repos/{repo_id}/diff?path=README.md")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("diff json");
+        assert_eq!(value["path"], "README.md");
+        assert_eq!(value["kind"], "diff");
+        assert_eq!(value["truncated"], false);
+        assert!(
+            value["patch"]
+                .as_str()
+                .expect("patch")
+                .contains("tracked change"),
+            "patch should contain the worktree hunk: {value}"
+        );
+
+        let response = get(format!("/api/v1/repos/{repo_id}/diff?path=local.txt")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("untracked json");
+        assert_eq!(value["kind"], "untracked");
+        assert_eq!(value["patch"], "");
+
+        let response = get(format!("/api/v1/repos/{repo_id}/diff?path=missing.txt")).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = get(format!(
+            "/api/v1/repos/{repo_id}/diff?path=..%2Foutside.txt"
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+
+        let response = get(format!(
+            "/api/v1/repos/{repo_id}/diff?path=C%3A%2FWindows%2Fwin.ini"
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let status_after = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["status", "--porcelain"])
+            .output()
+            .expect("status after");
+        assert_eq!(
+            status_before.stdout, status_after.stdout,
+            "diff endpoint must stay read-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_api_contract_rejects_bare_repository() {
+        let temp = TempDir::new().expect("temp dir");
+        let database_path = temp.path().join("index.db");
+        let database = Database::open(&database_path).expect("database");
+        let root_path = temp.path().join("root");
+        let bare_path = root_path.join("archives/bare.git");
+        fs::create_dir_all(&bare_path).expect("bare dir");
+        git(&bare_path, &["init", "--bare", "-q"]);
+
+        let now = Utc::now();
+        let root = Root {
+            id: None,
+            name: "root".to_owned(),
+            path: root_path,
+            disk_label: None,
+            mount_point: None,
+            priority: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let root_id = database.upsert_root(&root).expect("root");
+        let repo_id = database
+            .upsert_repo(&RepoRecord {
+                id: None,
+                root_id,
+                org: "archives".to_owned(),
+                name: "bare".to_owned(),
+                rel_path: std::path::PathBuf::from("archives/bare.git"),
+                remote_url: None,
+                remote_host: None,
+                remote_namespace: None,
+                org_source: Some("path".to_owned()),
+                default_branch: None,
+                head_commit: None,
+                last_fetch_at: None,
+                last_pull_status: None,
+                dirty: false,
+                ahead: 0,
+                behind: 0,
+                status_checked_at: None,
+                size_bytes: 0,
+                is_bare: true,
+                clone_status: "ok".to_owned(),
+                repo_kind: RepoKind::ThirdParty,
+                modify_lock: true,
+                lock_violation: false,
+                push_protect_remote: None,
+                scan_fingerprint: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .expect("bare repo");
+        drop(database);
+
+        let app = build_router(database_path);
+        let request = Request::builder()
+            .uri(format!("/api/v1/repos/{repo_id}/diff?path=README.md"))
+            .body(Body::empty())
+            .expect("diff request");
+        let response = app.oneshot(request).await.expect("diff response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_space_api_contract_reports_bytes_and_missing_roots() {
+        let temp = TempDir::new().expect("temp dir");
+        let database_path = temp.path().join("index.db");
+        let database = Database::open(&database_path).expect("database");
+        let root_path = temp.path().join("root");
+        fs::create_dir_all(&root_path).expect("root dir");
+        let now = Utc::now();
+        let root = Root {
+            id: None,
+            name: "root".to_owned(),
+            path: root_path,
+            disk_label: None,
+            mount_point: None,
+            priority: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        let root_id = database.upsert_root(&root).expect("root");
+        drop(database);
+
+        let app = build_router(database_path);
+        let request = Request::builder()
+            .uri(format!("/api/v1/roots/{root_id}/space"))
+            .body(Body::empty())
+            .expect("space request");
+        let response = app.clone().oneshot(request).await.expect("space response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("space json");
+        assert_eq!(value["rootId"], root_id);
+        assert!(
+            value["availableBytes"].as_u64().expect("bytes") > 0,
+            "free space should be positive: {value}"
+        );
+
+        let request = Request::builder()
+            .uri("/api/v1/roots/99999/space")
+            .body(Body::empty())
+            .expect("missing request");
+        let response = app.oneshot(request).await.expect("missing response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn repo_policy_view_reports_source_and_effective() {
+        let temp = TempDir::new().expect("temp dir");
+        let database_path = temp.path().join("index.db");
+        let database = Database::open(&database_path).expect("database");
+        let (repo_id, _repo_path) = setup_dirty_repo(&temp, &database);
+        drop(database);
+        let app = build_router(database_path);
+
+        async fn get_policy(app: axum::Router, repo_id: i64) -> serde_json::Value {
+            let request = Request::builder()
+                .uri(format!("/api/v1/repos/{repo_id}/policy"))
+                .body(Body::empty())
+                .expect("policy request");
+            let response = app.oneshot(request).await.expect("policy response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            serde_json::from_slice(&body).expect("policy json")
+        }
+
+        let initial = get_policy(app.clone(), repo_id).await;
+        assert_eq!(initial["source"], "kind-default");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/tags")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"slug":"e2e-source","label":"e2e-source"}"#))
+            .expect("tag request");
+        let response = app.clone().oneshot(request).await.expect("tag response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let request = Request::builder()
+            .uri("/api/v1/tags")
+            .body(Body::empty())
+            .expect("tags request");
+        let response = app.clone().oneshot(request).await.expect("tags response");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("tags body");
+        let tags: serde_json::Value = serde_json::from_slice(&body).expect("tags json");
+        let tag_id = tags
+            .as_array()
+            .expect("tags array")
             .iter()
-            .filter(|sequence| **sequence > last_event_id)
-            .count();
-        assert_eq!(replayed, 2);
+            .find(|tag| tag["slug"] == "e2e-source")
+            .expect("created tag")["id"]
+            .as_i64()
+            .expect("tag id");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/repos/{repo_id}/tags"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"slug":"e2e-source"}"#))
+            .expect("attach request");
+        let response = app.clone().oneshot(request).await.expect("attach response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let request = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/v1/tags/{tag_id}/policy"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"pullStrategy":"mirror","conflict":"stop","unattended":"skip"}"#,
+            ))
+            .expect("tag policy request");
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("tag policy response");
+        assert!(response.status().is_success(), "{}", response.status());
+
+        let tagged = get_policy(app.clone(), repo_id).await;
+        assert_eq!(tagged["source"], "tag");
+        assert_eq!(tagged["sourceTagId"], tag_id);
+        assert_eq!(tagged["effective"]["pullStrategy"], "mirror");
+
+        let request = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/v1/repos/{repo_id}/policy"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"pullStrategy":"archive","conflict":"skip","unattended":"skip"}"#,
+            ))
+            .expect("repo policy request");
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("repo policy response");
+        assert!(response.status().is_success(), "{}", response.status());
+
+        let overridden = get_policy(app, repo_id).await;
+        assert_eq!(overridden["source"], "repo");
+        assert_eq!(overridden["effective"]["pullStrategy"], "archive");
+        assert_eq!(overridden["effective"]["conflict"], "skip");
     }
 }

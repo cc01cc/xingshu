@@ -76,8 +76,9 @@ dir = "webui"
 alias = "build:ui"
 
 [tasks.test]
+depends = ["test:release-prepare"]
 run = "cargo test --workspace"
-description = "Run all Rust tests"
+description = "Run release-prep script tests and all Rust tests"
 alias = "test"
 
 [tasks."test:ui"]
@@ -117,7 +118,7 @@ alias = "clean"
 
 [tasks.staging]
 run = 'pwsh -NoProfile -File scripts/create-test-staging.ps1'
-description = "Create new synthetic .staging run (never writes real S:\\zeogit-ref)"
+description = "Create a fresh synthetic .staging run using test repositories only"
 alias = "staging"
 
 [tasks."staging:dev"]
@@ -125,3 +126,19 @@ usage = 'flag "--run-id <run-id>" default="dev-001" help="Staging run id, used a
 run = 'pwsh -NoProfile -File scripts/create-test-staging.ps1 -TargetRoot .staging/{{usage.run_id}}'
 description = "Create dev staging run under .staging/<run-id> (default dev-001)"
 alias = "staging:dev"
+
+[tasks."release:prepare"]
+usage = '''
+flag "--first-release" help="Keep workspace 0.1.0 for the first stable release"
+flag "--bump <level>" help="Bump level: minor by default; patch explicit; major allowed at 1.0+"
+flag "--dry-run" help="Preview only (default)"
+flag "--execute" help="Apply cargo-release version step"
+'''
+run = "node scripts/release-prepare.mjs"
+description = "Preview workspace version bump; minor default, patch explicit, major at 1.0+; cargo-release 0.25.20 required for bumps, no publish/tag/push"
+alias = "release:prepare"
+
+[tasks."test:release-prepare"]
+run = "node --test scripts/tests/release-prepare.test.mjs"
+description = "Test release-preparation argument and version rules"
+alias = "test:release-prepare"

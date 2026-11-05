@@ -1,3 +1,5 @@
+pub mod backup;
+pub mod clone;
 pub mod config;
 pub mod db;
 pub mod git;
@@ -6,9 +8,14 @@ pub mod mover;
 pub mod policy;
 pub mod progress;
 pub mod puller;
+pub mod read_content;
 pub mod scanner;
+pub mod search_index;
+pub mod search_types;
+pub mod type_extensions;
 pub mod types;
 pub mod vcs;
+pub mod worktree_search;
 
 pub use db::Database;
 pub use progress::ProgressReporter;

@@ -90,3 +90,30 @@ button:disabled { cursor: not-allowed; }
 
 .task-conflicts { margin-top: 16px; border-top: 1px solid #80623b; }.task-conflicts-heading { display: flex; justify-content: space-between; margin-top: 14px; color: #d6aa68; font-size: 12px; }.task-conflicts-heading span { color: #89908e; font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace; }.task-conflict { margin-top: 10px; padding: 12px; border: 1px solid #80623b; background: #211e18; }.task-conflict > div:first-child strong { display: block; font-size: 12px; font-weight: 500; }.task-conflict p { margin: 9px 0; color: #aeb6b1; font-size: 12px; line-height: 1.6; }.task-conflict-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .task-result-rendered { margin-top: 10px; display: grid; gap: 10px; }.task-summary { margin: 0; color: #d6aa68; font-size: 12px; font-weight: 500; }.task-counts { display: flex; flex-wrap: wrap; gap: 6px; }.count-badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid #3a403c; border-radius: 99px; font: 12px ui-monospace, monospace; line-height: 1.5; color: #aab2ad; background: #191c1b; }.count-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .85; }.count-badge.count-ok { color: #9db5a3; border-color: #3c5144; background: #162019; }.count-badge.count-aborted { color: #d6aa68; border-color: #80623b; background: #211e18; }.count-badge.count-failed { color: #e89a9a; border-color: #6b3a3a; background: #221818; }.count-badge.count-skipped { color: #8c9aa0; border-color: #3a4447; background: #181d1e; }.count-badge.count-conflict { color: #d6aa68; border-color: #80623b; background: #211e18; }.task-repos-wrap { max-height: 300px; overflow: auto; border: 1px solid #2d322f; border-radius: 4px; }.task-repos-table { width: 100%; border-collapse: collapse; font-size: 12px; }.task-repos-table th { position: sticky; top: 0; background: #1d1b17; color: #8c9490; font: 12px ui-monospace, monospace; letter-spacing: .1em; line-height: 1.5; padding: 8px 9px; text-align: left; border-bottom: 1px solid #2d322f; white-space: nowrap; }.task-repos-table td { padding: 8px 9px; border-top: 1px solid #292d2c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; vertical-align: middle; }.task-repos-table .status { min-width: 48px; text-align: center; }.task-repos-table .status.success { color: #9db5a3; border-color: #3c5144; background: #162019; }.task-repos-table .status.warning { color: #d6aa68; border-color: #80623b; background: #211e18; }.task-repos-table .status.error { color: #e89a9a; border-color: #6b3a3a; background: #221818; }.error-cell { color: #a87a7a; max-width: 220px; }.task-scan-stats { display: flex; gap: 10px; flex-wrap: wrap; color: #aeb6b1; font-size: 12px; line-height: 1.6; }.task-scan-stats span { padding: 5px 9px; border: 1px solid #353a37; border-radius: 99px; background: #191c1b; }.task-raw { margin-top: 2px; }.task-raw summary { cursor: pointer; color: #7a8580; font-size: 12px; list-style: none; }.task-raw summary::before { content: "▸ "; }.task-raw[open] summary::before { content: "▾ "; }.task-json { display: block; margin-top: 8px; padding: 10px 12px; background: #0f1111; border: 1px solid #292d2c; color: #9fb0a8; font: 12px ui-monospace, monospace; line-height: 1.6; white-space: pre; overflow-x: auto; max-height: 320px; line-height: 1.5; }
+
+/* PLAN-0314: 抽屉状态与备份分区 */
+.section-status, .section-backup { margin-top: 22px; padding-top: 14px; border-top: 1px solid #292d2c; }
+.section-title-row { display: flex; justify-content: space-between; align-items: center; padding-bottom: 8px; border-bottom: 1px solid #292d2c; margin-bottom: 12px; font-size: 13px; }
+.section-title-row b { color: #e6e8e6; }
+.kv-inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.remote-result { margin-top: 10px; border: 1px solid #292d2c; border-left: 2px solid #d6aa68; border-radius: 6px; padding: 8px 12px; font-size: 13px; background: #202422; }
+.backup-row { display: grid; grid-template-columns: 92px 64px 72px 1fr; gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px dashed #292d2c; font-size: 13px; white-space: nowrap; }
+.backup-row:last-of-type { border-bottom: none; }
+.backup-time { font-variant-numeric: tabular-nums; color: #e6e8e6; font-weight: 500; }
+.backup-ops { display: flex; gap: 6px; justify-content: flex-end; }
+.prune-entry { margin-top: 10px; }
+.prune-preview { margin-top: 10px; border: 1px solid #292d2c; border-radius: 6px; background: #202422; padding: 10px 12px; display: grid; gap: 4px; }
+.prune-path { color: #e89a9a; font-size: 12px; word-break: break-all; }
+.prune-keep { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.prune-keep-input { width: 84px; padding: 5px 10px; }
+
+/* PLAN-0316: read-only diff sheet */
+.diff-sheet { width: min(760px, 94vw); }
+.diff-kind { margin: 10px 0 0; font-size: 13px; }
+.diff-patch { margin-top: 12px; padding: 12px; background: #0f1111; border: 1px solid #292d2c; color: #9fb0a8; font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; line-height: 1.55; white-space: pre; overflow: auto; max-height: 62vh; }
+.conflict-files li.diff-entry { cursor: pointer; }
+.conflict-files li.diff-entry:hover, .conflict-files li.diff-entry:focus-visible { color: #d6aa68; outline: none; }
+.move-space { margin: 8px 0 0; font-size: 13px; color: #aab2ad; }
+.move-space.space-short { color: #e89a9a; }
+.policy-block { display: grid; gap: 10px; margin-bottom: 6px; }
+.policy-subtitle { margin-top: 26px; }

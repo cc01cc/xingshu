@@ -62,10 +62,21 @@ pub struct RepoRecord {
     pub name: String,
     pub rel_path: PathBuf,
     pub remote_url: Option<String>,
+    /// Host parsed from `remote_url` (PLAN-297 ISS-08); `None` when unknown.
+    pub remote_host: Option<String>,
+    /// Full namespace path from `remote_url` (keeps GitLab nested groups).
+    pub remote_namespace: Option<String>,
+    /// Where `org` came from: `remote` or `path` (`None` for legacy rows).
+    pub org_source: Option<String>,
     pub default_branch: Option<String>,
     pub head_commit: Option<String>,
     pub last_fetch_at: Option<DateTime<Utc>>,
     pub last_pull_status: Option<String>,
+    /// Working-tree state captured by the last scan (PLAN-297 ISS-02A).
+    pub dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    pub status_checked_at: Option<DateTime<Utc>>,
     pub size_bytes: u64,
     pub is_bare: bool,
     pub clone_status: String,
@@ -73,6 +84,8 @@ pub struct RepoRecord {
     pub modify_lock: bool,
     pub lock_violation: bool,
     pub push_protect_remote: Option<String>,
+    /// Last scan fingerprint for incremental scans (PLAN-297 ISS-05).
+    pub scan_fingerprint: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -201,6 +214,9 @@ pub struct ScanOptions {
     pub skip_dirs: Vec<String>,
     pub include_nested: bool,
     pub my_orgs: Vec<String>,
+    /// Skip git metadata rereads for repositories whose fingerprint is
+    /// unchanged (PLAN-297 ISS-05).
+    pub incremental: bool,
 }
 
 impl Default for ScanOptions {
@@ -222,6 +238,7 @@ impl Default for ScanOptions {
             .collect(),
             include_nested: false,
             my_orgs: Vec::new(),
+            incremental: true,
         }
     }
 }

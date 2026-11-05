@@ -221,10 +221,19 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     await expect(dirtyCard.getByRole("button", { name: "覆盖本地" })).toBeEnabled();
     await expect(dirtyCard.getByRole("button", { name: "保持现状" })).toBeEnabled();
 
+    // PLAN-0316：点击 dirty 明细文件 → 只读 diff 弹层（含工作区 hunk）
+    const diffEntry = dirtyCard.locator(".conflict-files li.diff-entry", { hasText: "README.md" });
+    await expect(diffEntry).toBeVisible();
+    await diffEntry.click();
+    await expect(page.locator(".diff-sheet")).toBeVisible();
+    await expect(page.locator(".diff-sheet .diff-patch")).toContainText("tracked staging change");
+    await page.locator(".diff-sheet button[data-slot='sheet-close']").click();
+    await expect(page.locator(".diff-sheet")).toHaveCount(0);
+
     // decide abort for dirty-demo to keep filesystem stable
     await dirtyCard.getByRole("button", { name: "保持现状" }).click();
     // drain remaining conflicts (keep current state) so the task reaches a terminal state:
-    // every waiting card gets aborted; conflicts region empties when all repos are decided
+    // every waiting card gets skipped; conflicts region empties when all repos are decided
     await expect(async () => {
       const pending = page.locator(".task-conflict button:enabled", { hasText: "保持现状" });
       const count = await pending.count();
@@ -335,7 +344,7 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
       });
     }).toPass({ timeout: 30000 });
     await expect(page.locator(".task-status")).toHaveClass(/completed|failed/, { timeout: 20000 });
-    await expect(page.locator(".task-repos-table")).toContainText(/已中止|aborted/, { timeout: 10000 });
+    await expect(page.locator(".task-repos-table")).toContainText(/已跳过|skipped|已中止|aborted/, { timeout: 10000 });
     await page.locator(".task-panel").getByRole("button", { name: "关闭" }).click().catch(() => {});
   });
 
@@ -371,5 +380,142 @@ test.describe("星枢 XS - 核心功能 E2E (Playwright CLI)", () => {
     expect(errors.filter((e) => e.includes("favicon"))).toHaveLength(0);
     // 徽标：无 ahead 仓库时不出现在任何行（渲染无错误即可，ahead 场景由有头验证覆盖）
     expect(await page.locator(".status.warning", { hasText: "本地领先" }).count()).toBeGreaterThanOrEqual(0);
+  });
+
+  test("PLAN-0314 状态过滤与抽屉状态/备份区", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator("table tbody tr")).toHaveCount(6, { timeout: 10000 });
+
+    // 状态过滤：本地改动 只剩 dirty-demo
+    await page.getByLabel("按状态过滤").click();
+    await page.getByRole("option", { name: "本地改动" }).click();
+    await expect(page.locator("table tbody tr")).toHaveCount(1);
+    await expect(page.locator("table tbody tr").first()).toContainText("dirty-demo");
+    await page.getByLabel("按状态过滤").click();
+    await page.getByRole("option", { name: "全部状态" }).click();
+    await expect(page.locator("table tbody tr")).toHaveCount(6);
+
+    // 抽屉状态区 + 备份区可见
+    await page.locator("table tbody tr").first().click();
+    const drawer = page.locator(".drawer");
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByText("状态", { exact: true })).toBeVisible();
+    await expect(drawer.getByRole("button", { name: "检测远端" })).toBeVisible();
+    await expect(drawer.getByText("备份", { exact: true })).toBeVisible();
+    await expect(drawer.getByRole("button", { name: "创建备份" })).toBeVisible();
+
+    // 远端检测（点击后才产生网络请求；staging remote 不存在 → unknown）
+    await drawer.getByRole("button", { name: "检测远端" }).click();
+    await expect(drawer.locator(".remote-result")).toContainText(/远端|unknown/, { timeout: 15000 });
+
+    // 备份列表可能为空（staging 未必有 .bak），面板空态可接受
+    await expect(drawer.getByText(/暂无备份|备份/).first()).toBeVisible();
+  });
+
+  test("PLAN-0316 只读 diff：契约与安全拒绝", async ({ page }) => {
+    const reposResponse = await page.request.get("/api/v1/repos");
+    expect(reposResponse.status()).toBe(200);
+    const repos = (await reposResponse.json()) as Array<{ id: number; name: string }>;
+    const dirty = repos.find((repo) => repo.name.includes("dirty-demo"));
+    expect(dirty).toBeTruthy();
+    const repoId = dirty!.id;
+
+    // tracked 修改：返回相对 HEAD 的只读 patch
+    const diffResponse = await page.request.get(`/api/v1/repos/${repoId}/diff?path=README.md`);
+    expect(diffResponse.status()).toBe(200);
+    const diff = (await diffResponse.json()) as { path: string; kind: string; patch: string; truncated: boolean };
+    expect(diff.path).toBe("README.md");
+    expect(diff.kind).toBe("diff");
+    expect(diff.patch).toContain("tracked staging change");
+    expect(diff.truncated).toBe(false);
+
+    // 未跟踪文件：无 patch、明确标记
+    const untrackedResponse = await page.request.get(`/api/v1/repos/${repoId}/diff?path=local-change.txt`);
+    expect(untrackedResponse.status()).toBe(200);
+    const untracked = (await untrackedResponse.json()) as { kind: string; patch: string };
+    expect(untracked.kind).toBe("untracked");
+    expect(untracked.patch).toBe("");
+
+    // 越界与绝对路径拒绝
+    expect((await page.request.get(`/api/v1/repos/${repoId}/diff?path=..%2Foutside.txt`)).status()).toBe(400);
+    expect((await page.request.get(`/api/v1/repos/${repoId}/diff?path=C%3A%2Fwindows%2Fwin.ini`)).status()).toBe(400);
+    // 不存在的路径
+    expect((await page.request.get(`/api/v1/repos/${repoId}/diff?path=missing.txt`)).status()).toBe(404);
+
+    // bare 仓库拒绝
+    const bare = repos.find((repo) => repo.name.includes("bare"));
+    if (bare) {
+      expect((await page.request.get(`/api/v1/repos/${bare.id}/diff?path=README.md`)).status()).toBe(400);
+    }
+  });
+
+  test("PLAN-0316 标签策略：生效来源与继承语义", async ({ page }) => {
+    const reposResponse = await page.request.get("/api/v1/repos");
+    const repos = (await reposResponse.json()) as Array<{ id: number; name: string; tags: string[] }>;
+    const own = repos.find((repo) => repo.name.includes("own-demo"));
+    expect(own).toBeTruthy();
+    const repoId = own!.id;
+
+    const slug = `e2e-policy-${Date.now().toString(36)}`;
+    const created = await page.request.post("/api/v1/tags", { data: { slug, label: slug } });
+    expect(created.status()).toBe(201);
+    const tags = (await (await page.request.get("/api/v1/tags")).json()) as Array<{ id: number; slug: string }>;
+    const tagId = tags.find((tag) => tag.slug === slug)!.id;
+    expect((await page.request.post(`/api/v1/repos/${repoId}/tags`, { data: { slug } })).status()).toBe(204);
+
+    // 标签策略写入生效层；成员仓 reason 为 tag 且 effective 反映该策略
+    const set = await page.request.put(`/api/v1/tags/${tagId}/policy`, {
+      data: { pullStrategy: "mirror", conflict: "stop", unattended: "skip" },
+    });
+    expect(set.status()).toBeLessThan(400);
+    const view = (await (await page.request.get(`/api/v1/repos/${repoId}/policy`)).json()) as Record<string, unknown>;
+    expect(view.source).toBe("tag");
+    expect(view.sourceTagId).toBe(tagId);
+    expect((view.effective as Record<string, unknown>).pullStrategy).toBe("mirror");
+
+    // UI：策略页加载成员仓 → 来源徽标显示标签
+    await page.goto("/");
+    await page.getByRole("link", { name: "策略" }).click();
+    await page.getByLabel("选择仓库").click();
+    await page.getByRole("option", { name: new RegExp(own!.name) }).click();
+    await page.getByRole("button", { name: "加载" }).first().click();
+    await expect(page.getByText(/来源：标签/)).toBeVisible({ timeout: 8000 });
+
+    // 清理：移除成员与标签，还原继承语义
+    expect((await page.request.delete(`/api/v1/repos/${repoId}/tags`, { data: { slug } })).status()).toBe(204);
+    expect((await page.request.delete(`/api/v1/tags/${tagId}`)).status()).toBeLessThan(400);
+    const after = (await (await page.request.get(`/api/v1/repos/${repoId}/policy`)).json()) as Record<string, unknown>;
+    expect(after.source).not.toBe("tag");
+  });
+
+  test("PLAN-0316 搬迁空间预检：真实端值 + 不足禁用", async ({ page }) => {
+    const rootsResponse = await page.request.get("/api/v1/roots");
+    expect(rootsResponse.status()).toBe(200);
+    const roots = (await rootsResponse.json()) as Array<{ id: number; name: string }>;
+    expect(roots.length).toBeGreaterThan(0);
+    const spaceResponse = await page.request.get(`/api/v1/roots/${roots[0].id}/space`);
+    expect(spaceResponse.status()).toBe(200);
+    const space = (await spaceResponse.json()) as { rootId: number; availableBytes: number };
+    expect(space.rootId).toBe(roots[0].id);
+    expect(space.availableBytes).toBeGreaterThan(0);
+    expect((await page.request.get("/api/v1/roots/99999/space")).status()).toBe(404);
+
+    // UI：mock 空间不足 → 搬迁按钮禁用 + 提示
+    await page.route("**/api/v1/roots/*/space", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ rootId: 1, availableBytes: 1 }),
+      }),
+    );
+    await page.goto("/");
+    await page.locator("table tbody tr").first().click();
+    const drawer = page.locator(".drawer");
+    await expect(drawer).toBeVisible();
+    await drawer.getByLabel("目标根").click();
+    await page.locator("[role=option]:not([aria-disabled=true])").first().click();
+    await expect(drawer.locator(".move-space")).toContainText("空间不足", { timeout: 8000 });
+    await expect(drawer.getByRole("button", { name: "搬迁" })).toBeDisabled();
+    await page.unroute("**/api/v1/roots/*/space");
   });
 });

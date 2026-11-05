@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use tempfile::TempDir;
-use xingshu_core::mover::{move_repo, move_repo_with_available_space};
+use xingshu_core::mover::{available_space, move_repo, move_repo_with_available_space};
 
 fn repo(path: &Path) {
     fs::create_dir_all(path).expect("repo");
@@ -68,4 +68,13 @@ fn mover_rejects_insufficient_injected_space() {
     )
     .expect_err("insufficient space");
     assert!(error.to_string().contains("insufficient space"));
+}
+
+#[test]
+fn available_space_rejects_paths_without_drive_letter() {
+    let error = available_space(Path::new("/rooted/absolute")).expect_err("no drive letter");
+    assert!(
+        error.to_string().contains("cannot determine drive"),
+        "{error}"
+    );
 }

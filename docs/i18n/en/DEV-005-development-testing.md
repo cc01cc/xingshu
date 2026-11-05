@@ -1,16 +1,27 @@
 # Development and Testing
 
+> Sync status: the English document summarizes some examples and test-layer details from zh-Hans. The v0.1.0 candidate/stable release boundary, supported targets, and CLI/server data-path distinction are synchronized.
+
 ## Dev startup (mise first, mirrors A03-xihe)
 
 ```powershell
 mise run setup
 mise run staging:dev --run-id dev-001
-mise run dev          # == dev:host → 12681 server + 12680 Vite in parallel, Ctrl+C stops both; defaults to .staging/dev-001/xingshu-dev.db
-# Switch runs: $env:XINGSHU_DB = ".staging/dev-002/xingshu-dev.db"; mise run dev
-# Prod DB: mise run prod:server  # XINGSHU_ENV=prod, defaults to ./xingshu-prod.db, refuses .staging/ paths
+mise run dev          # == dev:host → 12681 server + 12680 Vite in parallel, Ctrl+C stops both; server defaults to .staging/dev-001/xingshu-dev.db
+# Switch server runs: $env:XINGSHU_DB = ".staging/dev-002/xingshu-dev.db"; mise run dev
+# Prod server DB: mise run prod:server  # XINGSHU_ENV=prod, defaults to CWD/xingshu-prod.db, refuses .staging/ paths
 ```
 
-Database files follow `xingshu-<env>.db`. Rename a legacy root `xingshu.db` (data from before 2026-09-06) to `xingshu-prod.db` once.
+The current database ledger is schema v5. The user confirmed that no legacy production database existed before the first stable release. The v0.1.0 CLI creates a fresh database in the OS user data directory; it does not import a legacy-named database or a development `.staging` database. Future schema changes must define migration and recovery behavior in their feature plan.
+
+## CLI Release Process and Runtime Paths
+
+- `mise run dev` / `prod:server` continue to use the existing server CWD/staging database contract. The CLI-specific user-data path resolver is implemented in source; official binaries and current platform availability are listed on the public GitHub Releases page.
+- The official CLI release binary uses the OS user data root (Windows `%LOCALAPPDATA%/Xingshu`, Linux `${XDG_DATA_HOME:-~/.local/share}/xingshu`); source CLI dev remains in checkout `.staging`. The CLI resolver is separate from the server resolver. The macOS data-path implementation is experimental and outside the v0.1.0 user-support matrix; GitHub Releases lists supported platforms and available binaries.
+- Pushing a candidate snapshot to public `release-candidate/v0.1.0` triggers the push-only candidate workflow. Candidate artifacts are Windows/Linux x86_64 only, include `-attempt-<run_attempt>` in their names, and are immutable per run; a candidate is not a public Release. After candidate acceptance and final user approval, the release owner fast-forwards the same commit to public `main` and pushes the stable SemVer tag `v0.1.0` (no prerelease suffix). The tag workflow finds the successful candidate run on the candidate branch with the same SHA/attempt, verifies hashes, and reuses the original assets without rebuilding.
+- Git is a CLI runtime dependency; users need `git` available on PATH for repository operations. `xs db path` shows the effective environment and database path without creating the database.
+- The current source includes `mise run release:prepare`: dry-run minor by default; for the first release, `--first-release` verifies workspace version `0.1.0` and no-ops without requiring `cargo-release`. Non-first bumps require the maintainer to install `cargo-release` 0.25.20 manually and put it on PATH; the task does not install it. While the workspace is 0.x, explicit patch is supported and major is rejected; at 1.0+, standard SemVer permits explicit patch or major while the default remains minor. Only `--execute` updates the workspace version/lockfile. The task will not publish crates, create tags, or push. Transitioning from 0.x to 1.0 requires a separate approved stability decision/PLAN and one-time manual workspace version change; it is not routine automation, and there is no `--version` option. The maintainer curates the CHANGELOG; an Agent must not downgrade the default bump to patch.
+- Before 1.0, all versions are unstable. Breaking CLI/config/default-path/schema changes use minor and carry a `BREAKING` changelog note. Standard SemVer applies after 1.0.
 
 Raw equivalent (two terminals):
 

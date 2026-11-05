@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Command-line interface for Xingshu"
 
 [[bin]]
-name = "xingshu"
+name = "xs"
 path = "src/main.rs"
 
 [dependencies]

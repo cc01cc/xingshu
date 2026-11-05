@@ -49,6 +49,7 @@ $dirty = Join-Path $rootA 'network/dirty-demo'
 & git clone --quiet -- $thirdPartyRemote $dirty
 if ($LASTEXITCODE -ne 0) { throw "failed to clone dirty fixture" }
 Set-Content -LiteralPath (Join-Path $dirty 'local-change.txt') -Value "uncommitted staging change`n" -Encoding utf8
+Add-Content -LiteralPath (Join-Path $dirty 'README.md') -Value "tracked staging change`n" -Encoding utf8
 
 $own = Join-Path $rootA 'self/own-demo'
 New-Item -ItemType Directory -Path (Split-Path -Parent $own) -Force | Out-Null
@@ -92,7 +93,7 @@ Invoke-Git $divergedSeed @('commit', '-q', '-m', 'rewritten upstream commit')
 Invoke-Git $divergedSeed @('push', '-q', '--force')
 
 $manifest = [ordered]@{
-    source = 'synthetic; never copied from S:\\zeogit-ref'
+    source = 'synthetic test repositories only'
     rootA = $rootA
     rootB = $rootB
     repositories = @(

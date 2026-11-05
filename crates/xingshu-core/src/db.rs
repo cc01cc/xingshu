@@ -10,7 +10,7 @@ use crate::types::{
 };
 
 const SCHEMA: &str = include_str!("../../../schema.sql");
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone)]
 pub struct Database {
@@ -35,12 +35,19 @@ impl Database {
                 "conflict_mode",
                 "TEXT NOT NULL DEFAULT 'policy'",
             )?;
-            ensure_column(
-                connection,
-                "task_repos",
-                "conflict_json",
-                "TEXT",
-            )?;
+            ensure_column(connection, "task_repos", "conflict_json", "TEXT")?;
+            for (column, definition) in [
+                ("remote_host", "TEXT"),
+                ("remote_namespace", "TEXT"),
+                ("org_source", "TEXT"),
+                ("dirty", "INTEGER NOT NULL DEFAULT 0"),
+                ("ahead", "INTEGER NOT NULL DEFAULT 0"),
+                ("behind", "INTEGER NOT NULL DEFAULT 0"),
+                ("status_checked_at", "TEXT"),
+                ("scan_fingerprint", "TEXT"),
+            ] {
+                ensure_column(connection, "repos", column, definition)?;
+            }
             let now = Utc::now().to_rfc3339();
             connection
                 .execute(
@@ -151,27 +158,29 @@ impl Database {
         })
     }
 
-    pub fn upsert_repo(&self, repo: &RepoRecord) -> Result<i64, VcsError> {
+    /// Insert one repository row without replacing an existing location.
+    /// The root existence check and insert run in the same SQLite statement.
+    pub(crate) fn insert_repo(&self, repo: &RepoRecord) -> Result<i64, VcsError> {
         let now = Utc::now().to_rfc3339();
-        let default_lock = repo.repo_kind.default_modify_lock();
         self.with_connection(|connection| {
-            connection
+            let inserted = connection
                 .execute(
-                    "INSERT INTO repos (root_id, org, name, rel_path, remote_url, default_branch, head_commit,
-                       size_bytes, is_bare, clone_status, repo_kind, modify_lock, lock_violation,
-                       push_protect_remote, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
-                     ON CONFLICT(root_id, rel_path) DO UPDATE SET org=excluded.org, name=excluded.name,
-                       remote_url=excluded.remote_url, default_branch=excluded.default_branch,
-                       head_commit=excluded.head_commit, size_bytes=excluded.size_bytes, is_bare=excluded.is_bare,
-                       clone_status=excluded.clone_status, lock_violation=excluded.lock_violation,
-                       updated_at=excluded.updated_at",
+                    "INSERT INTO repos (root_id, org, name, rel_path, remote_url, remote_host, remote_namespace,
+                       org_source, default_branch, head_commit, size_bytes, is_bare, clone_status, repo_kind,
+                       modify_lock, lock_violation, push_protect_remote, dirty, ahead, behind,
+                       status_checked_at, scan_fingerprint, created_at, updated_at)
+                     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                       ?18, ?19, ?20, ?21, ?22, ?23, ?23
+                     WHERE EXISTS (SELECT 1 FROM roots WHERE id = ?1)",
                     params![
                         repo.root_id,
                         repo.org,
                         repo.name,
                         repo.rel_path.to_string_lossy(),
                         repo.remote_url,
+                        repo.remote_host,
+                        repo.remote_namespace,
+                        repo.org_source,
                         repo.default_branch,
                         repo.head_commit,
                         repo.size_bytes as i64,
@@ -181,6 +190,68 @@ impl Database {
                         if repo.modify_lock { 1 } else { 0 },
                         if repo.lock_violation { 1 } else { 0 },
                         repo.push_protect_remote,
+                        if repo.dirty { 1 } else { 0 },
+                        repo.ahead as i64,
+                        repo.behind as i64,
+                        repo.status_checked_at.map(|time| time.to_rfc3339()),
+                        repo.scan_fingerprint,
+                        now,
+                    ],
+                )
+                .map_err(|_| VcsError::Database("repository registration failed".to_owned()))?;
+            if inserted != 1 {
+                return Err(VcsError::Database(
+                    "selected root is no longer registered".to_owned(),
+                ));
+            }
+            Ok(connection.last_insert_rowid())
+        })
+    }
+
+    pub fn upsert_repo(&self, repo: &RepoRecord) -> Result<i64, VcsError> {
+        let now = Utc::now().to_rfc3339();
+        let default_lock = repo.repo_kind.default_modify_lock();
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO repos (root_id, org, name, rel_path, remote_url, remote_host, remote_namespace,
+                       org_source, default_branch, head_commit, size_bytes, is_bare, clone_status, repo_kind,
+                       modify_lock, lock_violation, push_protect_remote, dirty, ahead, behind,
+                       status_checked_at, scan_fingerprint, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                       ?18, ?19, ?20, ?21, ?22, ?23, ?23)
+                     ON CONFLICT(root_id, rel_path) DO UPDATE SET org=excluded.org, name=excluded.name,
+                       remote_url=excluded.remote_url, remote_host=excluded.remote_host,
+                       remote_namespace=excluded.remote_namespace, org_source=excluded.org_source,
+                       default_branch=excluded.default_branch, head_commit=excluded.head_commit,
+                       size_bytes=excluded.size_bytes, is_bare=excluded.is_bare,
+                       clone_status=excluded.clone_status, lock_violation=excluded.lock_violation,
+                       dirty=excluded.dirty, ahead=excluded.ahead, behind=excluded.behind,
+                       status_checked_at=excluded.status_checked_at,
+                       scan_fingerprint=excluded.scan_fingerprint, updated_at=excluded.updated_at",
+                    params![
+                        repo.root_id,
+                        repo.org,
+                        repo.name,
+                        repo.rel_path.to_string_lossy(),
+                        repo.remote_url,
+                        repo.remote_host,
+                        repo.remote_namespace,
+                        repo.org_source,
+                        repo.default_branch,
+                        repo.head_commit,
+                        repo.size_bytes as i64,
+                        repo.is_bare,
+                        repo.clone_status,
+                        repo.repo_kind.as_str(),
+                        if repo.modify_lock { 1 } else { 0 },
+                        if repo.lock_violation { 1 } else { 0 },
+                        repo.push_protect_remote,
+                        if repo.dirty { 1 } else { 0 },
+                        repo.ahead as i64,
+                        repo.behind as i64,
+                        repo.status_checked_at.map(|time| time.to_rfc3339()),
+                        repo.scan_fingerprint,
                         now,
                     ],
                 )
@@ -271,9 +342,10 @@ impl Database {
         self.with_connection(|connection| {
             let mut statement = connection
                 .prepare(
-                    "SELECT id, root_id, org, name, rel_path, remote_url, default_branch, head_commit,
-                       last_fetch_at, last_pull_status, size_bytes, is_bare, clone_status, repo_kind,
-                       modify_lock, lock_violation, push_protect_remote, created_at, updated_at
+                    "SELECT id, root_id, org, name, rel_path, remote_url, remote_host, remote_namespace,
+                       org_source, default_branch, head_commit, last_fetch_at, last_pull_status, dirty, ahead,
+                       behind, status_checked_at, size_bytes, is_bare, clone_status, repo_kind, modify_lock,
+                       lock_violation, push_protect_remote, scan_fingerprint, created_at, updated_at
                      FROM repos ORDER BY org, name",
                 )
                 .map_err(|error| VcsError::Database(error.to_string()))?;
@@ -289,12 +361,42 @@ impl Database {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT id, root_id, org, name, rel_path, remote_url, default_branch, head_commit,
-                       last_fetch_at, last_pull_status, size_bytes, is_bare, clone_status, repo_kind,
-                       modify_lock, lock_violation, push_protect_remote, created_at, updated_at
+                    "SELECT id, root_id, org, name, rel_path, remote_url, remote_host, remote_namespace,
+                       org_source, default_branch, head_commit, last_fetch_at, last_pull_status, dirty, ahead,
+                       behind, status_checked_at, size_bytes, is_bare, clone_status, repo_kind, modify_lock,
+                       lock_violation, push_protect_remote, scan_fingerprint, created_at, updated_at
                      FROM repos WHERE name = ?1 OR org || '/' || name = ?1
-                       OR rel_path = ?1 OR replace(rel_path, char(92), '/') = ?1 LIMIT 1",
+                       OR rel_path = ?1 OR replace(rel_path, char(92), '/') = ?1
+                       OR (remote_host IS NOT NULL AND remote_host || '/' || org || '/' || name = ?1)
+                     ORDER BY CASE
+                       WHEN rel_path = ?1 OR replace(rel_path, char(92), '/') = ?1 THEN 0
+                       WHEN remote_host IS NOT NULL AND remote_host || '/' || org || '/' || name = ?1 THEN 1
+                       ELSE 2 END
+                     LIMIT 1",
                     params![query],
+                    row_to_repo,
+                )
+                .optional()
+                .map_err(|error| VcsError::Database(error.to_string()))
+        })
+    }
+
+    /// Look up a repository by its exact location inside a root (used by the
+    /// incremental scanner, PLAN-297 ISS-05).
+    pub fn find_repo_at(
+        &self,
+        root_id: i64,
+        relative_path: &Path,
+    ) -> Result<Option<RepoRecord>, VcsError> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, root_id, org, name, rel_path, remote_url, remote_host, remote_namespace,
+                       org_source, default_branch, head_commit, last_fetch_at, last_pull_status, dirty, ahead,
+                       behind, status_checked_at, size_bytes, is_bare, clone_status, repo_kind, modify_lock,
+                       lock_violation, push_protect_remote, scan_fingerprint, created_at, updated_at
+                     FROM repos WHERE root_id = ?1 AND rel_path = ?2",
+                    params![root_id, relative_path.to_string_lossy()],
                     row_to_repo,
                 )
                 .optional()
@@ -306,9 +408,10 @@ impl Database {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT id, root_id, org, name, rel_path, remote_url, default_branch, head_commit,
-                       last_fetch_at, last_pull_status, size_bytes, is_bare, clone_status, repo_kind,
-                       modify_lock, lock_violation, push_protect_remote, created_at, updated_at
+                    "SELECT id, root_id, org, name, rel_path, remote_url, remote_host, remote_namespace,
+                       org_source, default_branch, head_commit, last_fetch_at, last_pull_status, dirty, ahead,
+                       behind, status_checked_at, size_bytes, is_bare, clone_status, repo_kind, modify_lock,
+                       lock_violation, push_protect_remote, scan_fingerprint, created_at, updated_at
                      FROM repos WHERE id = ?1",
                     params![repo_id],
                     row_to_repo,
@@ -961,7 +1064,7 @@ fn parse_optional_time(value: Option<String>) -> Result<Option<DateTime<Utc>>, r
 }
 
 fn row_to_repo(row: &rusqlite::Row<'_>) -> Result<RepoRecord, rusqlite::Error> {
-    let kind: String = row.get(13)?;
+    let kind: String = row.get(20)?;
     let repo_kind = RepoKind::try_from(kind.as_str())
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     Ok(RepoRecord {
@@ -971,19 +1074,27 @@ fn row_to_repo(row: &rusqlite::Row<'_>) -> Result<RepoRecord, rusqlite::Error> {
         name: row.get(3)?,
         rel_path: PathBuf::from(row.get::<_, String>(4)?),
         remote_url: row.get(5)?,
-        default_branch: row.get(6)?,
-        head_commit: row.get(7)?,
-        last_fetch_at: parse_optional_time(row.get(8)?)?,
-        last_pull_status: row.get(9)?,
-        size_bytes: row.get::<_, i64>(10)?.max(0) as u64,
-        is_bare: row.get::<_, i64>(11)? != 0,
-        clone_status: row.get(12)?,
+        remote_host: row.get(6)?,
+        remote_namespace: row.get(7)?,
+        org_source: row.get(8)?,
+        default_branch: row.get(9)?,
+        head_commit: row.get(10)?,
+        last_fetch_at: parse_optional_time(row.get(11)?)?,
+        last_pull_status: row.get(12)?,
+        dirty: row.get::<_, i64>(13)? != 0,
+        ahead: row.get::<_, i64>(14)?.max(0) as u32,
+        behind: row.get::<_, i64>(15)?.max(0) as u32,
+        status_checked_at: parse_optional_time(row.get(16)?)?,
+        size_bytes: row.get::<_, i64>(17)?.max(0) as u64,
+        is_bare: row.get::<_, i64>(18)? != 0,
+        clone_status: row.get(19)?,
         repo_kind,
-        modify_lock: row.get::<_, i64>(14)? != 0,
-        lock_violation: row.get::<_, i64>(15)? != 0,
-        push_protect_remote: row.get(16)?,
-        created_at: parse_time(row.get(17)?)?,
-        updated_at: parse_time(row.get(18)?)?,
+        modify_lock: row.get::<_, i64>(21)? != 0,
+        lock_violation: row.get::<_, i64>(22)? != 0,
+        push_protect_remote: row.get(23)?,
+        scan_fingerprint: row.get(24)?,
+        created_at: parse_time(row.get(25)?)?,
+        updated_at: parse_time(row.get(26)?)?,
     })
 }
 

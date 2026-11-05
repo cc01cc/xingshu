@@ -166,6 +166,24 @@ fn is_conflict_message(message: &str) -> bool {
     .any(|marker| message.contains(marker))
 }
 
+/// Audit row for a failed pull/backup action (PLAN-297 ISS-07).
+pub fn make_failed_fetch_log(repo_id: i64, strategy: &str, result: &str, error: &str) -> FetchLog {
+    let now = Utc::now();
+    FetchLog {
+        id: None,
+        repo_id,
+        started_at: now,
+        finished_at: Some(now),
+        strategy: strategy.to_owned(),
+        result: result.to_owned(),
+        objects: None,
+        bytes: None,
+        error: Some(error.to_owned()),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 pub fn make_fetch_log(repo_id: i64, strategy: &str, outcome: &PullOutcome) -> FetchLog {
     let now = Utc::now();
     FetchLog {
@@ -212,11 +230,17 @@ pub fn resolve_pull_conflict(
     repo: &RepoRecord,
     action: PullConflictAction,
 ) -> Result<PullOutcome, VcsError> {
-    resolve_pull_conflict_with_info(path, repo, &ResolvedPolicy {
-        pull_strategy: "fetch-only".to_owned(),
-        conflict_action: action,
-        unattended_action: action,
-    }, PullMode::Interactive, None)
+    resolve_pull_conflict_with_info(
+        path,
+        repo,
+        &ResolvedPolicy {
+            pull_strategy: "fetch-only".to_owned(),
+            conflict_action: action,
+            unattended_action: action,
+        },
+        PullMode::Interactive,
+        None,
+    )
 }
 
 fn resolve_pull_conflict_with_info(
@@ -232,37 +256,42 @@ fn resolve_pull_conflict_with_info(
     };
     match action {
         PullConflictAction::Stop => Err(VcsError::ConflictNeedsDecision(info.map(Box::new))),
-        PullConflictAction::Abort => Ok(PullOutcome {
-            result: "aborted".to_owned(),
+        PullConflictAction::Skip => Ok(PullOutcome {
+            result: "skipped".to_owned(),
             backup_path: None,
             conflict: info,
             output: None,
         }),
         PullConflictAction::Backup => {
+            let remote = repo.remote_url.as_deref().ok_or_else(|| {
+                VcsError::GitCommand("cannot backup without origin remote".to_owned())
+            })?;
             let backup = backup_path(path);
             fs::rename(path, &backup).map_err(|error| {
                 VcsError::Filesystem(format!("backup {}: {error}", path.display()))
             })?;
-            let remote = repo.remote_url.as_deref().ok_or_else(|| {
-                VcsError::GitCommand("cannot re-clone without origin remote".to_owned())
-            });
-            match remote {
-                Ok(remote) => {
-                    if let Err(error) = clone_into(remote, path) {
-                        return Err(VcsError::Filesystem(format!(
-                            "re-clone failed after backup {}: {error}",
-                            backup.display()
-                        )));
-                    }
-                    Ok(PullOutcome {
-                        result: "ok".to_owned(),
-                        backup_path: Some(backup),
-                        conflict: info,
-                        output: None,
-                    })
+            if let Err(error) = clone_into(remote, path) {
+                // Atomic semantics: drop any partial clone and restore the
+                // original repository before reporting failure (PLAN-297 ISS-07).
+                if path.exists() {
+                    let _ = fs::remove_dir_all(path);
                 }
-                Err(error) => Err(error),
+                return match fs::rename(&backup, path) {
+                    Ok(()) => Err(VcsError::Filesystem(format!(
+                        "re-clone failed after backup; original restored: {error}"
+                    ))),
+                    Err(rollback_error) => Err(VcsError::Filesystem(format!(
+                        "re-clone failed after backup {} (rollback failed: {rollback_error}): {error}",
+                        backup.display()
+                    ))),
+                };
             }
+            Ok(PullOutcome {
+                result: "ok".to_owned(),
+                backup_path: Some(backup),
+                conflict: info,
+                output: None,
+            })
         }
         PullConflictAction::Overwrite => {
             git::run_git(path, &["reset", "--hard"])?;

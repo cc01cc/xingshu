@@ -46,9 +46,161 @@ paths:
         - name: action
           in: path
           required: true
-          schema: { type: string, enum: [backup, overwrite, abort] }
+          schema: { type: string, enum: [backup, overwrite, skip] }
       responses:
         '200': { $ref: '#/components/responses/PullResult' }
+  /api/v1/repos/{repoId}/status:
+    get:
+      operationId: repoStatus
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+        - name: remote
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: When true, compare against the real remote with read-only
+            `git ls-remote` (no local writes; failures are reported as unknown).
+      responses:
+        '200':
+          description: Local snapshot fields; remote drift when requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dirty: { type: boolean }
+                  ahead: { type: integer }
+                  behind: { type: integer }
+                  statusCheckedAt: { type: [string, 'null'] }
+                  remote:
+                    type: [object, 'null']
+                    properties:
+                      state: { type: string, enum: [up-to-date, changed, unknown] }
+                      branch: { type: string }
+                      detail: { type: string }
+  /api/v1/repos/{repoId}/diff:
+    get:
+      operationId: repoDiff
+      description: Read-only single-file worktree diff (staged + unstaged versus
+        HEAD) capped at 512 KiB; untracked or binary files return a `kind` marker
+        without a patch. The endpoint never writes to the repository.
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+          description: Repository-relative path. Absolute paths, `..` traversal,
+            and paths resolving outside the repository are rejected with 400.
+      responses:
+        '200':
+          description: Diff payload for one path.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [path, kind, patch, truncated]
+                properties:
+                  path: { type: string }
+                  kind: { type: string, enum: [diff, binary, untracked, no_head] }
+                  patch: { type: string }
+                  truncated: { type: boolean }
+        '400':
+          description: Invalid or escaping `path`, or a bare repository layout
+            (Problem Details).
+        '404':
+          description: Repository or file not found (Problem Details).
+  /api/v1/repos/{repoId}/backups:
+    get:
+      operationId: listBackups
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+        - name: dest
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Backups matching `<name>.bak.*` (directories and archives).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    path: { type: string }
+                    isArchive: { type: boolean }
+                    bytes: { type: integer }
+                    createdAt: { type: string }
+    post:
+      operationId: createBackup
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dest: { type: string }
+                archive: { type: string, enum: [tar.gz, tar.zst] }
+                keep: { type: integer, default: 5 }
+      responses:
+        '201':
+          description: Backup path created (the source repository is untouched).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path: { type: string }
+  /api/v1/repos/{repoId}/backups/restore:
+    post:
+      operationId: restoreBackup
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string }
+                confirm: { type: boolean }
+                description: The current state is moved to `*.bak.pre-restore.*`
+                  first; failures roll the move back.
+      responses:
+        '200': { description: Restored }
+        '400': { description: "Missing `confirm: true`" }
+  /api/v1/repos/{repoId}/backups/prune:
+    post:
+      operationId: pruneBackups
+      parameters:
+        - { $ref: '#/components/parameters/RepoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keep]
+              properties:
+                keep: { type: integer }
+                dryRun: { type: boolean, default: true }
+                dest: { type: string }
+      responses:
+        '200':
+          description: Affected (deleted or would-delete) paths, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executed: { type: boolean }
+                  affected: { type: array, items: { type: string } }
   /api/v1/repos/{repoId}/tags:
     post:
       operationId: attachTag
@@ -101,6 +253,29 @@ paths:
       responses:
         '204': { description: Root deleted }
         '404': { $ref: '#/components/responses/ProblemResponse' }
+  /api/v1/roots/{rootId}/space:
+    get:
+      operationId: rootSpace
+      description: Read-only free-space probe for a registered root (drive letter
+        resolved via PowerShell `Get-PSDrive`). Probe failures are reported as
+        `space_probe_failed` instead of a silent zero so the UI never over-reports
+        available space.
+      parameters:
+        - { $ref: '#/components/parameters/RootId' }
+      responses:
+        '200':
+          description: Free space of the root volume.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rootId, availableBytes]
+                properties:
+                  rootId: { type: integer }
+                  availableBytes: { type: integer, minimum: 0 }
+        '404': { $ref: '#/components/responses/ProblemResponse' }
+        '502':
+          description: Space probe failed (Problem Details, code `space_probe_failed`).
   /api/v1/repos/{repoId}:
     put:
       operationId: updateRepoKind
@@ -192,10 +367,10 @@ paths:
         - { $ref: '#/components/parameters/RepoId' }
       responses:
         '200':
-          description: Repository pull policy
+          description: Repository pull policy plus its effective source layer.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Policy' }
+              schema: { $ref: '#/components/schemas/RepoPolicyView' }
     put:
       operationId: setRepoPolicy
       parameters:
@@ -519,8 +694,8 @@ components:
             - $ref: '#/components/schemas/ConflictInfoDiverged'
           nullable: true
           description: Structured conflict details; null falls back to conflictReason text.
-        allowedActions: { type: array, items: { type: string, enum: [backup, overwrite, abort] } }
-        requestedAction: { type: [string, 'null'], enum: [backup, overwrite, abort, null] }
+        allowedActions: { type: array, items: { type: string, enum: [backup, overwrite, skip] } }
+        requestedAction: { type: [string, 'null'], enum: [backup, overwrite, skip, abort, null] }
         result: { type: [string, 'null'] }
         durationMs: { type: [integer, 'null'], minimum: 0 }
         backupPath: { type: [string, 'null'] }
@@ -543,7 +718,7 @@ components:
           items: { type: array, items: { type: string }, minItems: 2, maxItems: 2 }
         statusEntries:
           type: array
-          description: `git status --porcelain` entries (index code, worktree code, path).
+          description: "`git status --porcelain` entries (index code, worktree code, path)."
           items:
             type: object
             required: [index, worktree, path]
@@ -593,7 +768,7 @@ components:
       type: object
       required: [action]
       properties:
-        action: { type: string, enum: [backup, overwrite, abort] }
+        action: { type: string, enum: [backup, overwrite, skip] }
     TaskDecisionAccepted:
       type: object
       required: [taskId, repoId, status, action]
@@ -601,7 +776,7 @@ components:
         taskId: { type: string }
         repoId: { type: integer, minimum: 1 }
         status: { type: string, const: resolving }
-        action: { type: string, enum: [backup, overwrite, abort] }
+        action: { type: string, enum: [backup, overwrite, skip] }
     TaskEvent:
       type: object
       properties:

@@ -45,8 +45,8 @@ export type TaskConflict = {
   status: "waiting_decision" | "resolving" | "failed" | "interrupted";
   conflictReason: string | null;
   conflictDetail: ConflictDetail | null;
-  allowedActions: Array<"backup" | "overwrite" | "abort">;
-  requestedAction: "backup" | "overwrite" | "abort" | null;
+  allowedActions: Array<"backup" | "overwrite" | "skip" | "abort">;
+  requestedAction: "backup" | "overwrite" | "skip" | "abort" | null;
   result: string | null;
   durationMs: number | null;
   backupPath: string | null;
@@ -186,13 +186,14 @@ function parseConflict(value: unknown): TaskConflict | null {
   }
   const allowedActions = Array.isArray(value.allowedActions)
     ? value.allowedActions.filter(
-        (action): action is "backup" | "overwrite" | "abort" =>
-          action === "backup" || action === "overwrite" || action === "abort",
+        (action): action is "backup" | "overwrite" | "skip" | "abort" =>
+          action === "backup" || action === "overwrite" || action === "skip" || action === "abort",
       )
     : [];
   const requestedAction =
     value.requestedAction === "backup" ||
     value.requestedAction === "overwrite" ||
+    value.requestedAction === "skip" ||
     value.requestedAction === "abort"
       ? value.requestedAction
       : null;
@@ -232,7 +233,7 @@ async function responseError(response: Response): Promise<Error> {
   return new Error(friendlyFetchMessage(raw));
 }
 
-export function useTaskStore() {
+function buildTaskStore() {
   const task = ref<Task | null>(null);
   const taskConflicts = ref<TaskConflict[]>([]);
   const connection = ref<TaskConnection>("idle");
@@ -493,7 +494,7 @@ export function useTaskStore() {
 
   async function decide(
     repoId: number,
-    action: "backup" | "overwrite" | "abort",
+    action: "backup" | "overwrite" | "skip" | "abort",
   ): Promise<void> {
     if (!activeTaskId) return;
     let response: Response;
@@ -540,4 +541,11 @@ export function useTaskStore() {
     decide,
     dismiss,
   };
+}
+
+let storeInstance: ReturnType<typeof buildTaskStore> | null = null;
+
+export function useTaskStore() {
+  if (!storeInstance) storeInstance = buildTaskStore();
+  return storeInstance;
 }

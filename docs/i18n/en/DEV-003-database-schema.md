@@ -1,7 +1,13 @@
 # Database Schema
 
-Database files follow `xingshu-<env>.db` and use WAL: `.staging/dev-001/xingshu-dev.db` by default, `./xingshu-prod.db` with `XINGSHU_ENV=prod` (explicit `--db` / `XINGSHU_DB` win). The current schema ledger version is `4`. Every table has `created_at` and `updated_at`, maintained by core write operations.
+> Sync status: the English document condenses some table and constraint details from zh-Hans. The schema ledger version and v0.1.0 database-path contract are synchronized.
+
+Databases use SQLite WAL; the current schema ledger version is `5`. The current source CLI/server dev default is `.staging/dev-001/xingshu-dev.db`; when `XINGSHU_ENV=prod`, the server defaults to `xingshu-prod.db` in its current working directory. Every table has `created_at` and `updated_at`, maintained by core write operations.
+
+**Official v0.1.0 CLI path behavior (implemented in source):** the official release CLI's prod database uses `xingshu-prod.db` under the OS user data directory; its dev database uses `dev/xingshu-dev.db` under the same data root. The Windows data root is `%LOCALAPPDATA%/Xingshu` and Linux is `${XDG_DATA_HOME:-~/.local/share}/xingshu`. The macOS path `~/Library/Application Support/Xingshu` is only an experimental build design and is outside the v0.1.0 user-support matrix; the GitHub Releases page lists currently supported platforms and available binaries. A source-checkout CLI in dev continues to use `.staging`. CLI precedence is explicit `--db` > `XINGSHU_DB` > environment/build default; the server keeps its existing CWD/server resolver.
+
+The first stable version is `0.1.0`; it initializes a fresh user database with the current schema v5 and does not import `.staging` data or a legacy database. This release does not change the schema. The FTS search index is a rebuildable sidecar; after the official database path changes, the sidecar can be rebuilt for the new database identity and is not part of first-release migration.
 
 The tables are `roots`, `repos`, `tags`, `repo_tags`, `policies`, `fetch_log`, `tasks`, and `task_repos`. Tags are Xingshu-owned domain labels. Repository policy takes precedence over tag policy. Third-party and frozen repositories default to `modify_lock=1`. Remote URL userinfo must be removed before persistence. The server marks `pending` and `running` tasks as `interrupted` at startup; `waiting_decision` task repositories remain recoverable, while `resolving` repositories are interrupted without automatic destructive-action replay.
 
-Schema changes require an explicit migration ledger and forward migration tests against the production schema. Tests must not delete the database to hide migration failures.
+Future schema changes require an explicit migration ledger and forward-migration tests against a real SQLite file using the current production schema. Tests must not delete the database to hide migration failures. The v0.1.0 release does not change the schema and does not import a legacy database or promise downgrade support; a feature plan that changes schema/data must define backup, restore, and failure handling.

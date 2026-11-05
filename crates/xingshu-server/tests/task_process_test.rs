@@ -55,6 +55,18 @@ fn stop_server(mut child: Child) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Server logs are JSONL on stderr by contract; assert nothing else leaks
+/// there (no panic backtraces, no raw non-JSON output).
+fn assert_clean_stderr(stderr: &str) {
+    for line in stderr.lines().filter(|line| !line.trim().is_empty()) {
+        assert!(!line.contains("panicked"), "server panicked: {stderr}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok(),
+            "unexpected non-JSON stderr line: {line}"
+        );
+    }
+}
+
 fn git(path: &Path, args: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
@@ -164,7 +176,7 @@ fn compiled_server_runs_task_http_and_sse_flow() {
     assert!(stream.contains("\"status\":\"completed\""), "{stream}");
 
     let stderr = stop_server(child);
-    assert!(stderr.is_empty(), "server stderr: {stderr}");
+    assert_clean_stderr(&stderr);
 }
 
 #[test]
@@ -257,8 +269,8 @@ fn compiled_server_resolves_task_conflict_through_http() {
         .find_task_repo(&task_id, repo_id)
         .expect("task repo lookup")
         .expect("task repo");
-    assert_eq!(task_repo.status, "aborted");
-    assert_eq!(task_repo.result.as_deref(), Some("aborted"));
+    assert_eq!(task_repo.status, "skipped");
+    assert_eq!(task_repo.result.as_deref(), Some("skipped"));
     assert!(repo_path.join("local.txt").is_file());
     let conflicts = http_request(
         port,
@@ -273,5 +285,5 @@ fn compiled_server_resolves_task_conflict_through_http() {
     );
 
     let stderr = stop_server(child);
-    assert!(stderr.is_empty(), "server stderr: {stderr}");
+    assert_clean_stderr(&stderr);
 }

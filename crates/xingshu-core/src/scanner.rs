@@ -15,6 +15,7 @@ pub struct ScanReport {
     pub broken_repos: usize,
     pub skipped_directories: usize,
     pub nested_repos: usize,
+    pub unchanged_repos: usize,
     pub errors: Vec<String>,
 }
 
@@ -79,6 +80,25 @@ fn scan_directory(
 
     if git::has_git_marker(current) {
         let relative = current.strip_prefix(root_path).unwrap_or(current);
+        let fingerprint_now = repo_fingerprint(current);
+        if options.incremental
+            && let Ok(Some(existing)) = database.find_repo_at(root_id, relative)
+            && existing.clone_status != "broken"
+            && existing.scan_fingerprint.as_deref() == Some(fingerprint_now.as_str())
+        {
+            report.unchanged_repos += 1;
+            report.repos_found += 1;
+            if let Some(reporter) = reporter {
+                reporter.item_finished(&relative.to_string_lossy(), "unchanged", None);
+            }
+            if !options.include_nested {
+                return Ok(());
+            }
+            report.nested_repos += scan_children(
+                database, root_id, root_path, current, depth, options, reporter, report,
+            )?;
+            return Ok(());
+        }
         let metadata = git::inspect(current);
         let (git_metadata, clone_status) = match metadata {
             Ok(value) => (value, "ok".to_owned()),
@@ -106,40 +126,19 @@ fn scan_directory(
                 )
             }
         };
-        let repo_kind = classify(&git_metadata, options);
-        let lock_violation = repo_kind.default_modify_lock() && git_metadata.dirty;
         if clone_status == "broken" {
             report.broken_repos += 1;
         }
-        let push_protect_remote = match &repo_kind {
-            RepoKind::ThirdParty => Some("origin".to_owned()),
-            RepoKind::Fork => Some("upstream".to_owned()),
-            RepoKind::ThirdPartyFrozen | RepoKind::Own => None,
-        };
-        let (org, name) = identify_repo(relative, git_metadata.remote_url.as_deref(), current);
-        let repo = RepoRecord {
-            id: None,
+        let repo = build_repo_record(
             root_id,
-            org,
-            name,
-            rel_path: relative.to_path_buf(),
-            remote_url: git_metadata.remote_url,
-            default_branch: git_metadata.default_branch,
-            head_commit: git_metadata.head_commit,
-            last_fetch_at: None,
-            last_pull_status: None,
-            size_bytes: directory_size(current),
-            is_bare: git_metadata.is_bare,
+            relative,
+            current,
+            git_metadata,
+            options,
             clone_status,
-            modify_lock: repo_kind.default_modify_lock(),
-            lock_violation,
-            repo_kind,
-            push_protect_remote,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
+        );
         let repo_id = database.upsert_repo(&repo)?;
-        database.set_lock_violation(repo_id, lock_violation)?;
+        database.set_lock_violation(repo_id, repo.lock_violation)?;
         tracing::debug!(
             root_id,
             repo_id,
@@ -151,7 +150,7 @@ fn scan_directory(
         if let Some(reporter) = reporter {
             reporter.item_finished(&relative.to_string_lossy(), &repo.clone_status, None);
         }
-        if lock_violation {
+        if repo.lock_violation {
             report.errors.push(format!(
                 "{}: lock_violation (working tree contains local changes)",
                 current.display()
@@ -225,6 +224,64 @@ fn should_skip_dir(name: &str, options: &ScanOptions) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
+pub(crate) fn build_repo_record(
+    root_id: i64,
+    relative: &Path,
+    current: &Path,
+    git_metadata: GitMetadata,
+    options: &ScanOptions,
+    clone_status: String,
+) -> RepoRecord {
+    let repo_kind = classify(&git_metadata, options);
+    let lock_violation = repo_kind.default_modify_lock() && git_metadata.dirty;
+    let push_protect_remote = match &repo_kind {
+        RepoKind::ThirdParty => Some("origin".to_owned()),
+        RepoKind::Fork => Some("upstream".to_owned()),
+        RepoKind::ThirdPartyFrozen | RepoKind::Own => None,
+    };
+    let (org, name) = identify_repo(relative, git_metadata.remote_url.as_deref(), current);
+    let remote_host = git_metadata.remote_url.as_deref().and_then(remote_host);
+    let remote_namespace = git_metadata
+        .remote_url
+        .as_deref()
+        .and_then(remote_namespace);
+    let org_source = if git_metadata.remote_url.is_some() {
+        "remote"
+    } else {
+        "path"
+    };
+
+    RepoRecord {
+        id: None,
+        root_id,
+        org,
+        name,
+        rel_path: relative.to_path_buf(),
+        remote_url: git_metadata.remote_url,
+        remote_host,
+        remote_namespace,
+        org_source: Some(org_source.to_owned()),
+        default_branch: git_metadata.default_branch,
+        head_commit: git_metadata.head_commit,
+        last_fetch_at: None,
+        last_pull_status: None,
+        dirty: git_metadata.dirty,
+        ahead: git_metadata.ahead,
+        behind: git_metadata.behind,
+        status_checked_at: Some(Utc::now()),
+        size_bytes: directory_size(current),
+        is_bare: git_metadata.is_bare,
+        clone_status,
+        modify_lock: repo_kind.default_modify_lock(),
+        lock_violation,
+        repo_kind,
+        push_protect_remote,
+        scan_fingerprint: Some(repo_fingerprint(current)),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }
+}
+
 fn is_generated_backup(path: &Path) -> bool {
     let name = path
         .file_name()
@@ -288,6 +345,60 @@ fn remote_owner(remote_url: &str) -> String {
         .nth(1)
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Host of a remote URL (https / ssh:// / scp-like); `None` for local paths.
+fn remote_host(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim();
+    if let Some(rest) = trimmed.split("://").nth(1) {
+        let authority = rest.split('/').next().unwrap_or_default();
+        let host = authority.rsplit('@').next().unwrap_or_default();
+        let host = host.split(':').next().unwrap_or_default();
+        return (!host.is_empty()).then(|| host.to_owned());
+    }
+    let (prefix, _path) = trimmed.rsplit_once(':')?;
+    if prefix.contains('/') {
+        return None;
+    }
+    let host = prefix.rsplit('@').next().unwrap_or_default();
+    (!host.is_empty()).then(|| host.to_owned())
+}
+
+/// Full namespace path of a remote URL (keeps nested groups), e.g.
+/// `https://gitlab.com/grp/sub/repo` -> `grp/sub`.
+fn remote_namespace(remote_url: &str) -> Option<String> {
+    let segments = remote_segments(remote_url);
+    let start = if remote_url.contains("://") { 1 } else { 0 };
+    if segments.len() <= start + 1 {
+        return None;
+    }
+    Some(segments[start..segments.len() - 1].join("/"))
+}
+
+/// Cheap change fingerprint: mtimes of the repository boundary and the git
+/// metadata files that change on fetch/commit (PLAN-297 ISS-05).
+fn repo_fingerprint(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for candidate in [
+        path.to_path_buf(),
+        path.join(".git"),
+        path.join(".git/HEAD"),
+        path.join(".git/index"),
+        path.join(".git/packed-refs"),
+        path.join(".git/refs"),
+        path.join("refs"),
+        path.join("packed-refs"),
+        path.join("HEAD"),
+    ] {
+        let stamp = fs::metadata(&candidate)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().to_string())
+            .unwrap_or_else(|| "-".to_owned());
+        parts.push(stamp);
+    }
+    parts.join(":")
 }
 
 fn remote_segments(remote_url: &str) -> Vec<&str> {

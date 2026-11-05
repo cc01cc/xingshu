@@ -157,7 +157,7 @@ fn bare_repository_is_skipped_by_batch_pull() {
     let outcome = pull_repo(
         &repo_path,
         &repo,
-        &policy(PullConflictAction::Abort),
+        &policy(PullConflictAction::Skip),
         PullMode::Unattended,
     )
     .expect("bare pull");
@@ -172,7 +172,12 @@ fn dirty_conflict_carries_status_entries() {
     let repo_path = root.join("network/demo");
     fs::create_dir_all(repo_path.parent().expect("parent")).expect("parent");
     Command::new("git")
-        .args(["clone", "-q", remote.to_string_lossy().as_ref(), repo_path.to_string_lossy().as_ref()])
+        .args([
+            "clone",
+            "-q",
+            remote.to_string_lossy().as_ref(),
+            repo_path.to_string_lossy().as_ref(),
+        ])
         .output()
         .expect("clone");
     fs::write(repo_path.join("README.md"), "changed\n").expect("tracked");
@@ -182,16 +187,20 @@ fn dirty_conflict_carries_status_entries() {
     let outcome = pull_repo(
         &repo_path,
         &repo,
-        &policy(PullConflictAction::Abort),
+        &policy(PullConflictAction::Skip),
         PullMode::Unattended,
     )
-    .expect("abort");
-    assert_eq!(outcome.result, "aborted");
+    .expect("skip");
+    assert_eq!(outcome.result, "skipped");
     let info = outcome.conflict.expect("conflict info");
     assert_eq!(info.kind, xingshu_core::ConflictKind::Dirty);
     assert_eq!(info.untracked, 1);
     assert_eq!(info.modified, 1);
-    assert!(info.status_entries.iter().any(|entry| entry.path.contains("untracked.txt")));
+    assert!(
+        info.status_entries
+            .iter()
+            .any(|entry| entry.path.contains("untracked.txt"))
+    );
     assert!(repo_path.join("untracked.txt").exists());
 }
 
@@ -203,7 +212,12 @@ fn upstream_rollback_ahead_clean_is_not_a_conflict() {
     let repo_path = root.join("network/demo");
     fs::create_dir_all(repo_path.parent().expect("parent")).expect("parent");
     Command::new("git")
-        .args(["clone", "-q", remote.to_string_lossy().as_ref(), repo_path.to_string_lossy().as_ref()])
+        .args([
+            "clone",
+            "-q",
+            remote.to_string_lossy().as_ref(),
+            repo_path.to_string_lossy().as_ref(),
+        ])
         .output()
         .expect("clone");
     git(&seed, &["config", "user.email", "test@example.invalid"]);
@@ -214,7 +228,10 @@ fn upstream_rollback_ahead_clean_is_not_a_conflict() {
     git(&seed, &["push", "-q"]);
     git(&repo_path, &["pull", "-q", "--ff-only"]);
     fs::write(repo_path.join("local.txt"), "local ahead\n").expect("file");
-    git(&repo_path, &["config", "user.email", "test@example.invalid"]);
+    git(
+        &repo_path,
+        &["config", "user.email", "test@example.invalid"],
+    );
     git(&repo_path, &["config", "user.name", "Xingshu Test"]);
     git(&repo_path, &["add", "local.txt"]);
     git(&repo_path, &["commit", "-q", "-m", "local ahead commit"]);
@@ -226,7 +243,7 @@ fn upstream_rollback_ahead_clean_is_not_a_conflict() {
     let outcome = pull_repo(
         &repo_path,
         &repo,
-        &policy(PullConflictAction::Abort),
+        &policy(PullConflictAction::Skip),
         PullMode::Unattended,
     )
     .expect("ahead pull should not conflict");
@@ -245,7 +262,12 @@ fn diverged_conflict_carries_dual_columns_and_equivalent() {
     let repo_path = root.join("network/demo");
     fs::create_dir_all(repo_path.parent().expect("parent")).expect("parent");
     Command::new("git")
-        .args(["clone", "-q", remote.to_string_lossy().as_ref(), repo_path.to_string_lossy().as_ref()])
+        .args([
+            "clone",
+            "-q",
+            remote.to_string_lossy().as_ref(),
+            repo_path.to_string_lossy().as_ref(),
+        ])
         .output()
         .expect("clone");
     // 本地领先 1：内容与上游重做提交相同（模拟回退重做）
@@ -258,7 +280,10 @@ fn diverged_conflict_carries_dual_columns_and_equivalent() {
     git(&seed, &["push", "-q"]);
     git(&repo_path, &["pull", "-q", "--ff-only"]);
     fs::write(repo_path.join("feature.txt"), "same content\n").expect("file");
-    git(&repo_path, &["config", "user.email", "test@example.invalid"]);
+    git(
+        &repo_path,
+        &["config", "user.email", "test@example.invalid"],
+    );
     git(&repo_path, &["config", "user.name", "Xingshu Test"]);
     git(&repo_path, &["add", "feature.txt"]);
     git(&repo_path, &["commit", "-q", "-m", "add feature line"]);
@@ -268,18 +293,21 @@ fn diverged_conflict_carries_dual_columns_and_equivalent() {
     git(&seed, &["reset", "-q", "--hard", "HEAD~1"]);
     fs::write(seed.join("feature.txt"), "same content\n").expect("file");
     git(&seed, &["add", "feature.txt"]);
-    git(&seed, &["commit", "-q", "-m", "reapply feature (upstream redo)"]);
+    git(
+        &seed,
+        &["commit", "-q", "-m", "reapply feature (upstream redo)"],
+    );
     git(&seed, &["push", "-q", "--force"]);
     let database = Database::open(temp.path().join("index.db")).expect("db");
     let repo = scanned_repo(&database, &root, &repo_path);
     let outcome = pull_repo(
         &repo_path,
         &repo,
-        &policy(PullConflictAction::Abort),
+        &policy(PullConflictAction::Skip),
         PullMode::Unattended,
     )
     .expect("diverged");
-    assert_eq!(outcome.result, "aborted");
+    assert_eq!(outcome.result, "skipped");
     let info = outcome.conflict.expect("diverged info");
     // 本地领先 2（A2 upstream commit + B feature commit，因上游回退了 A2），
     // 上游领先 1（C redo commit）

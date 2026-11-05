@@ -83,7 +83,7 @@ fn directory_size(path: &Path) -> u64 {
         .sum()
 }
 
-fn available_space(path: &Path) -> Result<u64, VcsError> {
+pub fn available_space(path: &Path) -> Result<u64, VcsError> {
     let drive = path
         .to_string_lossy()
         .chars()
@@ -92,7 +92,7 @@ fn available_space(path: &Path) -> Result<u64, VcsError> {
         .ok_or_else(|| {
             VcsError::Filesystem(format!("cannot determine drive: {}", path.display()))
         })?;
-    let command = format!("(Get-PSDrive -Name '{}').Free", drive);
+    let command = format!("(Get-PSDrive -Name '{drive}').Free");
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", command.as_str()])
         .output()

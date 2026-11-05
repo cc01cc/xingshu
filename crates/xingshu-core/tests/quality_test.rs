@@ -28,7 +28,7 @@ fn schema_ledger_and_timestamp_columns_survive_database_reopen() {
             let version: i64 = connection
                 .query_row("SELECT MAX(version) FROM schema_meta", [], |row| row.get(0))
                 .map_err(|error| xingshu_core::types::VcsError::Database(error.to_string()))?;
-            assert_eq!(version, 4);
+            assert_eq!(version, 5);
             for table in [
                 "roots",
                 "repos",
@@ -127,10 +127,17 @@ fn task_repo_restart_recovery_preserves_waiting_decisions_and_interrupts_resolvi
             name: "repo".to_owned(),
             rel_path: std::path::PathBuf::from("repo"),
             remote_url: None,
+            remote_host: None,
+            remote_namespace: None,
+            org_source: Some("path".to_owned()),
             default_branch: Some("main".to_owned()),
             head_commit: None,
             last_fetch_at: None,
             last_pull_status: None,
+            dirty: false,
+            ahead: 0,
+            behind: 0,
+            status_checked_at: Some(now),
             size_bytes: 0,
             is_bare: false,
             clone_status: "ok".to_owned(),
@@ -138,6 +145,7 @@ fn task_repo_restart_recovery_preserves_waiting_decisions_and_interrupts_resolvi
             modify_lock: false,
             lock_violation: false,
             push_protect_remote: None,
+            scan_fingerprint: None,
             created_at: now,
             updated_at: now,
         })

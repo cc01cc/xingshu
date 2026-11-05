@@ -5,7 +5,7 @@ pub enum PullConflictAction {
     Stop,
     Backup,
     Overwrite,
-    Abort,
+    Skip,
 }
 
 impl TryFrom<&str> for PullConflictAction {
@@ -16,11 +16,21 @@ impl TryFrom<&str> for PullConflictAction {
             "stop" => Ok(Self::Stop),
             "backup" => Ok(Self::Backup),
             "overwrite" => Ok(Self::Overwrite),
-            "abort" => Ok(Self::Abort),
+            "skip" | "abort" => Ok(Self::Skip),
             other => Err(VcsError::GitCommand(format!(
                 "invalid pull conflict policy: {other}"
             ))),
         }
+    }
+}
+
+/// Canonical wire value for an action (legacy `abort` maps to `skip`).
+pub fn action_value(action: PullConflictAction) -> &'static str {
+    match action {
+        PullConflictAction::Stop => "stop",
+        PullConflictAction::Backup => "backup",
+        PullConflictAction::Overwrite => "overwrite",
+        PullConflictAction::Skip => "skip",
     }
 }
 
@@ -36,7 +46,7 @@ impl Default for ResolvedPolicy {
         Self {
             pull_strategy: "fetch-only".to_owned(),
             conflict_action: PullConflictAction::Stop,
-            unattended_action: PullConflictAction::Abort,
+            unattended_action: PullConflictAction::Skip,
         }
     }
 }

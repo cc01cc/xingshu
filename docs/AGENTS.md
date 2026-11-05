@@ -7,7 +7,7 @@ This directory contains documentation specific to the Xingshu project. The works
 | Topic | Document |
 |------|----------|
 | Architecture | `i18n/zh-Hans/DEV-001-architecture.md` |
-| CLI and configuration | `i18n/zh-Hans/DEV-002-cli-config.md` |
+| CLI reference and configuration | `i18n/zh-Hans/DEV-002-cli-config.md` |
 | Database schema | `i18n/zh-Hans/DEV-003-database-schema.md` |
 | Logging and audit | `i18n/zh-Hans/DEV-004-logging.md` |
 | Development and testing | `i18n/zh-Hans/DEV-005-development-testing.md` |

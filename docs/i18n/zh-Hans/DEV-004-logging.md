@@ -6,7 +6,7 @@
 
 | 类型 | 载体 | 关键字段 |
 |------|------|----------|
-| 运行日志 | `tracing`，stderr 或 JSONL | timestamp、level、operation、request_id、repo_id、root_id、duration_ms、result、error |
+| 运行日志 | `tracing`，默认 JSONL 到 stderr（或 `XINGSHU_LOG_FILE` 文件日志） | timestamp、level、operation、request_id、repo_id、root_id、duration_ms、result、error |
 | Pull 审计 | SQLite `fetch_log` | repo、strategy、started_at、finished_at、result、objects、bytes、error |
 
 `xingshu-core` 只发 tracing event，不初始化全局 subscriber。CLI/server 在入口初始化 subscriber。`XINGSHU_LOG_LEVEL` 优先于 `RUST_LOG`；设置 `XINGSHU_LOG_FILE` 显式开启按日/大小轮转文件日志，默认单文件 10 MiB、保留 7 个轮转文件，可用 `XINGSHU_LOG_MAX_BYTES`/`XINGSHU_LOG_MAX_FILES` 覆盖。server 日志包含 `request_id` 与 `duration_ms`。
