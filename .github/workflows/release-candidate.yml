@@ -36,8 +36,15 @@ jobs:
           cache: false
       - name: Install project dependencies
         run: mise run setup
-      - name: Run release quality gate
-        run: mise run validate
+      # This is the task set behind `mise run validate`, split into named steps so public check runs identify the failing gate.
+      - name: Release gate — Rust and WebUI lint
+        run: mise run lint
+      - name: Release gate — WebUI typecheck
+        run: mise run typecheck
+      - name: Release gate — Rust and WebUI build
+        run: mise run build
+      - name: Release gate — release-prep and workspace tests
+        run: mise run test
 
   windows-linux-candidates:
     name: Candidate ${{ matrix.target }}
