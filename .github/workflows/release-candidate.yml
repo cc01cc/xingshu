@@ -121,7 +121,7 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          $binary = Join-Path $env:CARGO_TARGET_DIR "$env:RUST_TARGET\release\xs.exe"
+          $binary = [System.IO.Path]::GetFullPath((Join-Path $env:CARGO_TARGET_DIR "$env:RUST_TARGET\release\xs.exe"))
           if (-not (Test-Path -LiteralPath $binary)) { throw "Missing CLI binary: $binary" }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path -LiteralPath $vswhere)) { throw "vswhere.exe is required for the Windows CRT import check" }
@@ -292,7 +292,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          binary="$CARGO_TARGET_DIR/$RUST_TARGET/release/xs"
+          binary="$(realpath "$CARGO_TARGET_DIR/$RUST_TARGET/release/xs")"
           test -x "$binary"
           version="$($binary --version | awk '{print $NF}')"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
@@ -494,7 +494,7 @@ jobs:
           cargo build --locked --release -p xingshu-cli --target "$RUST_TARGET"
       - name: Smoke test experimental binary only
         run: |
-          binary="$CARGO_TARGET_DIR/$RUST_TARGET/release/xs"
+          binary="$(realpath "$CARGO_TARGET_DIR/$RUST_TARGET/release/xs")"
           "$binary" --version
           "$binary" --help
           git --version
