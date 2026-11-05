@@ -34,6 +34,8 @@ jobs:
         with:
           version: 2026.10.21
           cache: false
+      - name: Install pinned Rust lint components
+        run: rustup component add rustfmt clippy --toolchain 1.88.0-x86_64-unknown-linux-gnu
       - name: Install project dependencies
         run: mise run setup
       # This is the task set behind `mise run validate`, split into named steps so public check runs identify the failing gate.
