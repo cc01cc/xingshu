@@ -55,15 +55,17 @@ jobs:
           test_status=${PIPESTATUS[0]}
           set -e
           if (( test_status != 0 )); then
-            failures="$(grep -E '(^test .* FAILED|^failures:|^---- .* stdout ----|panicked at|^error\[|^error:)' "$RUNNER_TEMP/test.log" | head -n 40 || true)"
-            if [[ -n "$failures" ]]; then
+            failures="$(grep -E '(^test .* FAILED|^failures:|^---- .* stdout ----|panicked at|^error\[|^error:)' "$RUNNER_TEMP/test.log" || true)"
+            failure_blocks="$(awk '/^---- .* stdout ----$/ { capture = 1 } capture { print } capture && /^test result:/ { exit }' "$RUNNER_TEMP/test.log" | head -n 100 || true)"
+            diagnostics="$(printf '%s\n%s\n' "$failures" "$failure_blocks" | sed '/^[[:space:]]*$/d' | head -n 50)"
+            if [[ -n "$diagnostics" ]]; then
               {
                 echo '### Test failures'
                 echo '```text'
-                printf '%s\n' "$failures"
+                printf '%s\n' "$diagnostics"
                 echo '```'
               } >> "$GITHUB_STEP_SUMMARY"
-              while IFS= read -r line; do echo "::error::$line"; done <<<"$failures"
+              while IFS= read -r line; do echo "::error::$line"; done <<<"$diagnostics"
             fi
           fi
           exit "$test_status"
