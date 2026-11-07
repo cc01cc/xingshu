@@ -206,8 +206,15 @@ function writeRunRecord(recordPath, record) {
 }
 
 function closeOutputFiles(stdoutFd, stderrFd) {
-    closeSync(stdoutFd);
-    closeSync(stderrFd);
+    for (const fd of [stdoutFd, stderrFd]) {
+        try {
+            closeSync(fd);
+        } catch (error) {
+            // A second close on a failure path must stay harmless: letting EBADF escape
+            // would replace the failure that actually happened and hide its cause.
+            if (error?.code !== "EBADF") throw error;
+        }
+    }
 }
 
 export function cargoReleaseMissingError(command, args, stderr, runDirectory) {

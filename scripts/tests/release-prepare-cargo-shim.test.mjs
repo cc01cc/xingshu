@@ -14,9 +14,25 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import { prepareRelease } from "../release-prepare.mjs";
+
+// `node --test` runs test files as parallel processes that share one temp root, and
+// `runRecordDirectories()` below claims every `xs-release-prepare-*` directory that
+// appears in `os.tmpdir()` during a `runWithShim` window before deleting it. Redirect
+// the temp root for this file only, so the claim window can never cover a run record
+// that belongs to another process still in flight.
+//
+// All three variables are set because `os.tmpdir()` picks them per platform and the
+// precedence differs: POSIX reads TMPDIR, then TMP, then TEMP, while Windows (measured
+// on v24.19.0) ignores TMPDIR and uses TEMP, then TMP, then `%SystemRoot%\temp`. A single
+// variable would leave the other platform pointing at the shared root.
+const TEMP_ROOT = mkdtempSync(path.join(os.tmpdir(), "xs-cargo-shim-temp-"));
+process.env.TMPDIR = TEMP_ROOT;
+process.env.TEMP = TEMP_ROOT;
+process.env.TMP = TEMP_ROOT;
+after(() => rmSync(TEMP_ROOT, { recursive: true, force: true }));
 
 // Real-process tests: a fake `cargo` sits on PATH and a throwaway workspace is the cwd,
 // so the wrapper's spawn layer (PATH lookup, argv, exit code, run record) is exercised
