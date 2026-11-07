@@ -82,6 +82,7 @@ enum IndexCommand {
 struct RepoSelectArgs {
     #[arg(long = "repo")]
     repos: Vec<String>,
+    /// Registered root id (integer, not a path); see `xs roots list`.
     #[arg(long)]
     root: Option<i64>,
     #[arg(long)]
@@ -91,6 +92,7 @@ struct RepoSelectArgs {
 struct IndexUpdateArgs {
     #[arg(long = "repo")]
     repos: Vec<String>,
+    /// Registered root id (integer, not a path); see `xs roots list`.
     #[arg(long)]
     root: Option<i64>,
     #[arg(long, conflicts_with_all = ["root", "repos"])]
@@ -105,6 +107,7 @@ struct QueryArgs {
     repos: Vec<String>,
     #[arg(long)]
     tag: Option<String>,
+    /// Registered root id (integer, not a path); see `xs roots list`.
     #[arg(long)]
     root: Option<i64>,
     #[arg(short = 'F', long)]
@@ -137,6 +140,7 @@ struct GrepArgs {
     repos: Vec<String>,
     #[arg(long)]
     tag: Option<String>,
+    /// Registered root id (integer, not a path); see `xs roots list`.
     #[arg(long)]
     root: Option<i64>,
     #[arg(long, conflicts_with_all = ["root", "repos"])]
@@ -173,6 +177,7 @@ struct FilesArgs {
     repos: Vec<String>,
     #[arg(long)]
     tag: Option<String>,
+    /// Registered root id (integer, not a path); see `xs roots list`.
     #[arg(long)]
     root: Option<i64>,
     #[arg(long = "type")]
@@ -188,6 +193,7 @@ struct FilesArgs {
 struct ReadArgs {
     repo: String,
     path: PathBuf,
+    /// Registered root id (integer, not a path); see `xs roots list`.
     #[arg(long)]
     root: Option<i64>,
     #[arg(long = "ref")]
@@ -288,6 +294,8 @@ enum RootCommand {
 
 #[derive(Debug, Args)]
 struct ScanArgs {
+    /// Registered root path (PATH, not a root id), copied verbatim from the `path` field of
+    /// `xs roots list`; repeatable, omit to scan all registered roots.
     #[arg(long = "root")]
     roots: Vec<PathBuf>,
     #[arg(long, default_value_t = 0)]
@@ -306,6 +314,7 @@ struct ListArgs {
     query: Option<String>,
     #[arg(long)]
     tag: Option<String>,
+    /// Registered root id (integer, not a path); see `xs roots list`.
     #[arg(long)]
     root: Option<i64>,
     #[arg(long)]
@@ -1181,7 +1190,19 @@ fn scan(database: &Database, args: ScanArgs) -> Result<()> {
                     .iter()
                     .find(|root| root.path == *path)
                     .cloned()
-                    .ok_or_else(|| anyhow!("root is not registered: {}", path.display()))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "root is not registered: {}\n\
+                             `xs scan --root` takes a registered root path (not a root id), \
+                             copied verbatim from the `path` field of `xs roots list` (literal \
+                             comparison, no normalization).\n\
+                             `xs roots list` shows registered roots; `xs roots add <PATH>` \
+                             registers one. Commands that take `--root <ID>` (list, search, \
+                             files, grep, read, index, pull, status, clone) use the numeric `id` \
+                             field instead.",
+                            path.display()
+                        )
+                    })
             })
             .collect::<Result<Vec<_>>>()?
     };

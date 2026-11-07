@@ -10,6 +10,8 @@ Xingshu is a local index and management hub for projects and resources. The name
 - [Logging and audit](DEV-004-logging.md)
 - [Development and testing](DEV-005-development-testing.md)
 - [WebUI](USER-001-webui.md)
+- [Backup and output readability](DEV-006-backup-output.md)
 - [HTTP API](../../api/openapi.yaml)
+- [中文 README](../../../README.md)
 
 Status: the first index, tagging, policy, conflict, CLI, API, and Vue UI implementation exists. Advanced Git operations and the independent VCS direction are future work.

@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "xingshu-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "xingshu-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "xingshu-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",

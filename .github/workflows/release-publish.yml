@@ -220,128 +220,17 @@ jobs:
           VERSION: ${{ steps.candidate.outputs.version }}
           ASSET_ROOT: ${{ steps.assets.outputs.asset_root }}
           NOTES_FILE: ${{ steps.release-notes.outputs.notes_file }}
+          CANDIDATE_RUN_ID: ${{ steps.candidate.outputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ steps.candidate.outputs.candidate_run_attempt }}
         run: |
-          set -euo pipefail
-          repo="$REPOSITORY"
-          tag_ref="$RUNNER_TEMP/pushed-tag.json"
-          gh api "repos/$repo/git/ref/tags/$RELEASE_TAG" > "$tag_ref"
-          tag_type="$(jq -r '.object.type' "$tag_ref")"
-          tag_object="$(jq -r '.object.sha' "$tag_ref")"
-          if [[ "$tag_type" == "tag" ]]; then
-            tag_object="$(gh api "repos/$repo/git/tags/$tag_object" --jq '.object.sha')"
-          fi
-          if [[ "$tag_type" != "tag" && "$tag_type" != "commit" ]] || [[ "$tag_object" != "$SOURCE_COMMIT" ]]; then
-            echo "::error::The pushed stable tag does not resolve to the verified candidate commit."
+          set -Eeuo pipefail
+          # The state machine lives in .github/scripts/publish-release-step.sh so that it can be
+          # drilled locally (scripts/tests/publish-step-drill.sh: no network, no credentials).
+          # The publish job's ONLY checkout lands in `release-source/`, so the script is always
+          # addressed with that prefix; the repo-root path is never valid inside this job
+          # (PLAN-0692 P0-2 / review/04-lead-adjudication.md §2).
+          [[ -f release-source/.github/scripts/publish-release-step.sh ]] || {
+            echo "::error::publish step script missing from the tag commit: release-source/.github/scripts/publish-release-step.sh"
             exit 1
-          fi
-
-          expected_assets=(
-            "xingshu-v${VERSION}-x86_64-pc-windows-msvc.zip"
-            "xingshu-v${VERSION}-x86_64-pc-windows-msvc.zip.sha256"
-            "xingshu-v${VERSION}-x86_64-pc-windows-msvc.manifest.json"
-            "xingshu-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-            "xingshu-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
-            "xingshu-v${VERSION}-x86_64-unknown-linux-gnu.manifest.json"
-            "SHA256SUMS"
-          )
-          for name in "${expected_assets[@]}"; do
-            [[ -f "$ASSET_ROOT/$name" ]] || { echo "::error::Missing verified candidate asset: $name"; exit 1; }
-          done
-          expected_names="$(printf '%s\n' "${expected_assets[@]}" | sort)"
-
-          release_response="$RUNNER_TEMP/tag-release-response.txt"
-          release_error="$RUNNER_TEMP/tag-release-error.txt"
-          set +e
-          gh api --include "repos/$repo/releases/tags/$RELEASE_TAG" > "$release_response" 2> "$release_error"
-          release_status="$?"
-          set -e
-          http_status=""
-          if [[ -s "$release_response" ]]; then http_status="$(awk 'NR == 1 { print $2 }' "$release_response")"; fi
-
-          if [[ "$http_status" == "404" ]]; then
-            # This tag was pushed only after human approval. Leave the Release as a draft
-            # until every original candidate file has been uploaded and verified.
-            gh release create "$RELEASE_TAG" --draft --target "$SOURCE_COMMIT" \
-              --title "Xingshu $VERSION" --notes-file "$NOTES_FILE" --verify-tag --repo "$repo"
-          elif [[ "$http_status" != "200" ]]; then
-            if [[ "$release_status" -ne 0 ]]; then cat "$release_error" >&2; fi
-            echo "::error::Could not determine Release state for $RELEASE_TAG (HTTP ${http_status:-unknown})."
-            exit 1
-          fi
-
-          release_json="$RUNNER_TEMP/tag-release.json"
-          gh api "repos/$repo/releases/tags/$RELEASE_TAG" > "$release_json"
-          [[ "$(jq -r '.tag_name // empty' "$release_json")" == "$RELEASE_TAG" ]]
-          [[ "$(jq -r '.name // empty' "$release_json")" == "Xingshu $VERSION" ]]
-          release_id="$(jq -r '.id // empty' "$release_json")"
-          [[ -n "$release_id" ]]
-          is_draft="$(jq -r '.draft' "$release_json")"
-          expected_notes="$(cat "$NOTES_FILE")"
-          actual_notes="$(jq -r '.body // ""' "$release_json")"
-          published="false"
-          if [[ "$is_draft" == "false" ]]; then
-            published="true"
-            if [[ "$actual_notes" != "$expected_notes" ]]; then
-              echo "::error::Published Release notes differ from the tagged CHANGELOG section."
-              exit 1
-            fi
-          elif [[ "$actual_notes" != "$expected_notes" ]]; then
-            gh release edit "$RELEASE_TAG" --notes-file "$NOTES_FILE" --repo "$repo"
-          fi
-
-          assets_json="$RUNNER_TEMP/tag-release-assets.json"
-          gh api "repos/$repo/releases/$release_id/assets?per_page=100" > "$assets_json"
-          existing_names="$(jq -r '.[].name' "$assets_json" | sort)"
-          while IFS= read -r name; do
-            [[ -z "$name" ]] && continue
-            grep -Fxq "$name" <<<"$expected_names" || {
-              echo "::error::Existing Release has unexpected asset '$name'; refusing to overwrite it."
-              exit 1
-            }
-          done <<<"$existing_names"
-
-          verify_dir="$RUNNER_TEMP/tag-release-downloads"
-          mkdir -p "$verify_dir"
-          missing_assets=()
-          for name in "${expected_assets[@]}"; do
-            candidate_file="$ASSET_ROOT/$name"
-            if grep -Fxq "$name" <<<"$existing_names"; then
-              gh release download "$RELEASE_TAG" --repo "$repo" --pattern "$name" --dir "$verify_dir"
-              cmp --silent "$candidate_file" "$verify_dir/$name" || {
-                echo "::error::Existing Release asset '$name' differs from the verified candidate."
-                exit 1
-              }
-            else
-              if [[ "$published" == "true" ]]; then
-                echo "::error::Published Release is missing candidate asset '$name'; refusing to modify it."
-                exit 1
-              fi
-              missing_assets+=("$candidate_file")
-            fi
-          done
-
-          if [[ "$published" != "true" && ${#missing_assets[@]} -gt 0 ]]; then
-            gh release upload "$RELEASE_TAG" "${missing_assets[@]}" --repo "$repo"
-          fi
-
-          gh api "repos/$repo/releases/$release_id/assets?per_page=100" > "$assets_json"
-          final_names="$(jq -r '.[].name' "$assets_json" | sort)"
-          if [[ "$final_names" != "$expected_names" ]]; then
-            echo "::error::Release assets do not exactly match the verified candidate set."
-            printf 'Expected:\n%s\nActual:\n%s\n' "$expected_names" "$final_names"
-            exit 1
-          fi
-
-          rm -f "$verify_dir"/*
-          for name in "${expected_assets[@]}"; do
-            gh release download "$RELEASE_TAG" --repo "$repo" --pattern "$name" --dir "$verify_dir"
-            cmp --silent "$ASSET_ROOT/$name" "$verify_dir/$name" || {
-              echo "::error::Uploaded Release asset '$name' differs from candidate bytes."
-              exit 1
-            }
-          done
-
-          if [[ "$published" != "true" ]]; then
-            gh release edit "$RELEASE_TAG" --draft=false --latest --repo "$repo"
-          fi
-          echo "Verified stable Release $RELEASE_TAG from candidate run $CANDIDATE_RUN_ID at $SOURCE_COMMIT."
+          }
+          bash release-source/.github/scripts/publish-release-step.sh

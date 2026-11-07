@@ -195,34 +195,85 @@ fn check_db_allowed_under(path: &Path, prod: bool, staging: &Path) -> Result<(),
     if !prod {
         return Ok(());
     }
-    let staging_database = path_is_under(path, staging);
-    if staging_database {
-        return Err(format!(
+    let verdict = db_path_verdict(path, staging);
+    // `db_path_error_code` is an internal identifier (logs and unit tests only); it is never
+    // written into a user-visible message.
+    tracing::debug!(
+        code = db_path_error_code(&verdict).unwrap_or("none"),
+        path = %path.display(),
+        "classified database path"
+    );
+    match verdict {
+        PathVerdict::Inside => Err(format!(
             "refusing to open staging database {} with {}=prod; unset {} or use a dev run",
             path.display(),
             ENV_NAME,
             DB_ENV_VAR
-        ));
+        )),
+        PathVerdict::Outside => Ok(()),
+        PathVerdict::Undetermined { reason } => Err(format!(
+            "cannot classify --db path {} as production: {}; use a path whose parent directory \
+             exists, or unset {} and run with {}=dev",
+            path.display(),
+            reason,
+            DB_ENV_VAR,
+            ENV_NAME
+        )),
     }
-    Ok(())
 }
 
 pub fn staging_root() -> PathBuf {
     to_absolute(Path::new(STAGING_DIR))
 }
 
+/// Three-state classification of a database path against the staging directory.
+///
+/// `Undetermined` means the path could not be resolved at all (illegal characters, an
+/// unresolvable symlink/junction, a non-directory component, an unreadable parent). It must
+/// never be collapsed into "outside staging": the security check stays fail-closed on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathVerdict {
+    Inside,
+    Outside,
+    Undetermined { reason: String },
+}
+
 /// Resolve existing path components before comparing. This catches database paths that enter
 /// `.staging` through a symlink while still supporting a database file that has not been created.
-pub fn path_is_under(path: &Path, dir: &Path) -> bool {
+pub fn db_path_verdict(path: &Path, dir: &Path) -> PathVerdict {
     let resolved_path = match canonicalize_with_missing_tail(path) {
         Ok(path) => path,
-        Err(_) => return true, // fail closed if symlink/path resolution is ambiguous
+        Err(reason) => return PathVerdict::Undetermined { reason },
     };
     let resolved_dir = match canonicalize_with_missing_tail(dir) {
-        Ok(path) => path,
-        Err(_) => return true,
+        Ok(dir) => dir,
+        Err(reason) => return PathVerdict::Undetermined { reason },
     };
-    path_starts_with(&resolved_path, &resolved_dir)
+    if path_starts_with(&resolved_path, &resolved_dir) {
+        PathVerdict::Inside
+    } else {
+        PathVerdict::Outside
+    }
+}
+
+/// Internal error-code identifier for a verdict (logs and unit tests only).
+///
+/// The returned names are **not** user-visible message prefixes; user-facing text is the
+/// wording produced in `check_db_allowed_under`.
+pub fn db_path_error_code(verdict: &PathVerdict) -> Option<&'static str> {
+    match verdict {
+        PathVerdict::Inside => Some("db_path_in_staging"),
+        PathVerdict::Outside => None,
+        PathVerdict::Undetermined { .. } => Some("db_path_unresolvable"),
+    }
+}
+
+/// Coarse boolean view of [`db_path_verdict`].
+///
+/// Only `Inside` is `true`; `Undetermined` is `false` here, so security-relevant call sites must
+/// use `db_path_verdict`/`check_db_allowed_under` (which keep `Undetermined` rejected).
+pub fn path_is_under(path: &Path, dir: &Path) -> bool {
+    db_path_verdict(path, dir) == PathVerdict::Inside
 }
 
 fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
@@ -233,6 +284,13 @@ fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
     loop {
         match std::fs::canonicalize(&existing) {
             Ok(mut resolved) => {
+                if !suffix.is_empty() && !resolved.is_dir() {
+                    return Err(format!(
+                        "{} is not a directory in database path {}",
+                        display_path(&resolved),
+                        display_path(&absolute)
+                    ));
+                }
                 for component in suffix.iter().rev() {
                     resolved.push(component);
                 }
@@ -264,6 +322,16 @@ fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf, String> {
             Err(error) => return Err(error.to_string()),
         }
     }
+}
+
+/// Render a resolved path without the Windows `\\?\` verbatim prefix that `canonicalize` adds,
+/// so OS reasons in user-facing messages stay readable.
+fn display_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
 }
 
 fn path_starts_with(path: &Path, dir: &Path) -> bool {
@@ -470,25 +538,77 @@ mod tests {
         assert!(check_db_allowed_under(&temp.path().join("prod.db"), true, &staging).is_ok());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn prod_fails_closed_for_unresolvable_symlink_database_path() {
-        use std::os::unix::fs::symlink;
+    /// A database path whose parent component is a regular file: resolution fails with a
+    /// non-`NotFound` error, so the classifier cannot decide whether the path is inside staging.
+    fn unresolvable_db_path(temp: &tempfile::TempDir) -> PathBuf {
+        let blocker = temp.path().join("blocker.txt");
+        std::fs::write(&blocker, b"not a directory").expect("blocker file");
+        blocker.join("xingshu-prod.db")
+    }
 
-        let temp = tempfile::tempdir().expect("tempdir");
+    fn staging_dir(temp: &tempfile::TempDir) -> PathBuf {
         let staging = temp.path().join(".staging");
         std::fs::create_dir_all(&staging).expect("staging dir");
-        let dangling_alias = temp.path().join("dangling-alias");
-        symlink(staging.join("missing"), &dangling_alias).expect("dangling symlink");
+        staging
+    }
 
+    #[test]
+    fn verdict_distinguishes_three_states() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let staging = staging_dir(&temp);
+
+        assert_eq!(
+            db_path_verdict(&staging.join("dev-001/xingshu-dev.db"), &staging),
+            PathVerdict::Inside
+        );
+        assert_eq!(
+            db_path_verdict(&temp.path().join("xingshu-prod.db"), &staging),
+            PathVerdict::Outside
+        );
+        let undetermined = db_path_verdict(&unresolvable_db_path(&temp), &staging);
         assert!(
-            check_db_allowed_under(&dangling_alias.join("xingshu.db"), true, &staging).is_err()
+            matches!(undetermined, PathVerdict::Undetermined { .. }),
+            "{undetermined:?}"
         );
     }
 
     #[test]
-    fn path_prefix_matching() {
+    fn verdict_maps_to_error_code() {
+        assert_eq!(
+            db_path_error_code(&PathVerdict::Inside),
+            Some("db_path_in_staging")
+        );
+        assert_eq!(db_path_error_code(&PathVerdict::Outside), None);
+        assert_eq!(
+            db_path_error_code(&PathVerdict::Undetermined {
+                reason: "unresolvable".to_owned()
+            }),
+            Some("db_path_unresolvable")
+        );
+    }
+
+    #[test]
+    fn path_prefix_matching_uses_verdict() {
         let base = PathBuf::from("/tmp/xs-case");
+        assert_eq!(
+            db_path_verdict(
+                &base.join(".staging/dev-001/xingshu-dev.db"),
+                &base.join(".staging")
+            ),
+            PathVerdict::Inside
+        );
+        assert_eq!(
+            db_path_verdict(&base.join("xingshu-prod.db"), &base.join(".staging")),
+            PathVerdict::Outside
+        );
+        assert_eq!(
+            db_path_verdict(
+                &base.join(".staging-backup/xingshu-dev.db"),
+                &base.join(".staging")
+            ),
+            PathVerdict::Outside
+        );
+        // `path_is_under` stays a coarse boolean view over the same verdict.
         assert!(path_is_under(
             &base.join(".staging/dev-001/xingshu-dev.db"),
             &base.join(".staging")
@@ -501,5 +621,59 @@ mod tests {
             &base.join(".staging-backup/xingshu-dev.db"),
             &base.join(".staging")
         ));
+    }
+
+    #[test]
+    fn dev_never_reaches_verdict() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let staging = staging_dir(&temp);
+
+        // dev runs are not policed by the staging guard: the open layer reports real errors.
+        assert!(check_db_allowed_under(&staging.join("dev-001/x.db"), false, &staging).is_ok());
+        assert!(check_db_allowed_under(&unresolvable_db_path(&temp), false, &staging).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_alias_is_undetermined_not_inside() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let staging = staging_dir(&temp);
+        let dangling_alias = temp.path().join("dangling-alias");
+        symlink(staging.join("missing"), &dangling_alias).expect("dangling symlink");
+        let db = dangling_alias.join("xingshu.db");
+
+        let verdict = db_path_verdict(&db, &staging);
+        assert!(
+            matches!(verdict, PathVerdict::Undetermined { .. }),
+            "{verdict:?}"
+        );
+        let error = check_db_allowed_under(&db, true, &staging).expect_err("fail closed");
+        assert!(error.contains("cannot classify"), "{error}");
+        assert!(
+            !error.contains("refusing to open staging database"),
+            "{error}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_directory_component_is_undetermined_and_still_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let staging = staging_dir(&temp);
+        let db = unresolvable_db_path(&temp);
+
+        let verdict = db_path_verdict(&db, &staging);
+        assert!(
+            matches!(verdict, PathVerdict::Undetermined { .. }),
+            "{verdict:?}"
+        );
+        let error = check_db_allowed_under(&db, true, &staging).expect_err("fail closed");
+        assert!(error.contains("cannot classify"), "{error}");
+        assert!(
+            !error.contains("refusing to open staging database"),
+            "{error}"
+        );
     }
 }

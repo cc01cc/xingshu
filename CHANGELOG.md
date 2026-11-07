@@ -4,6 +4,23 @@ All notable changes to Xingshu are recorded here.
 
 ## Unreleased
 
+## [0.1.1] - 2026-11-08
+
+### Release engineering
+
+- Patch release with no breaking CLI, API, or WebUI change: the command set, flags, exit codes, and data/path semantics are unchanged since `v0.1.0`, so `0.1.1` is a safe in-place upgrade. The only CLI-visible deltas are the help-text and error-message clarifications listed under `### CLI`.
+- Rebuilt the stable publish workflow (`.github/workflows/release-publish.yml`) as one state machine: release state is resolved from the tag-filtered release list (`absent` / `one` / `multiple`) instead of `GET /releases/tags/{tag}`, because a draft release makes that endpoint return 404 and the previous probe read it as "no release". Assets are inventoried by release id while uploads and edits stay tag-addressed (gh tag addressing with a draft GraphQL fallback), and two releases sharing one tag are a hard failure.
+- The publish step now runs under `set -Eeuo pipefail` with an `ERR` trap and an `assert()` helper that emits `::error::`, and each run logs one `::notice::state=<state> assets=<visible>/<expected> notes=<ok|stale>` line; `CANDIDATE_RUN_ID`/`CANDIDATE_RUN_ATTEMPT` are passed through the referencing step's `env:` so `set -u` cannot trip on them.
+- Moved the step logic to `.github/scripts/publish-release-step.sh` with missing-file self-checks, so the job's single `release-source/` checkout is the only source of truth and the same script can be drilled locally; added `scripts/tests/publish-step-drill.sh` plus a `gh` shim covering the absent / draft / partial / complete / published states.
+- Candidate runs are located through the workflow-run endpoint instead of an artifact path filter, so the stable run reliably finds the approved candidate attempt.
+- Pinned `cargo-release` to 1.1.7 (`cargo install cargo-release --version 1.1.7 --locked`); the previous 0.25.20 pin could not perform the documented bump flow.
+- `mise run release:prepare -- --execute` now passes `--no-confirm` to cargo-release and re-reads the workspace version afterwards: if the tool exits 0 without changing `Cargo.toml`/`Cargo.lock`, the wrapper fails with an explicit error instead of reporting success, and it keeps the run record (`run.json`, `stdout.log`, `stderr.log`) for audit.
+
+### CLI
+
+- `--root` now says which of its two meanings it expects: `xs scan --root <PATH>` takes the **path** of a registered root, copied verbatim from the `path` field of `xs roots list` (literal comparison, no normalization), while the id-type commands (`list`, `search`, `files`, `grep`, `read`, `index`, `pull`, `status`, `clone`) keep taking the integer `id` from that table. `xs scan --help` documents both meanings, and an unregistered path now fails with `root is not registered` plus three-part guidance — what `scan --root` expects, how to see or add roots (`xs roots list` / `xs roots add <PATH>`), and which commands take `--root <ID>` — instead of an unexplained mismatch.
+- With `XINGSHU_ENV=prod`, a `--db` path is now classified three ways — `Inside` (under the current working directory's `.staging/`), `Outside`, or `Undetermined` — instead of a single inside/outside test. `Inside` is refused as before, `Outside` is accepted, and `Undetermined` still fails closed but with a layered message: `cannot classify --db path <PATH> as production: <OS reason>`, no longer mixed with the staging-violation wording. Previously an unclassifiable path was treated as outside staging and only failed later when the database was opened. Commands, flags, exit codes, and data-path semantics are otherwise unchanged.
+
 ## [0.1.0] - 2026-11-06
 
 ### CLI distribution

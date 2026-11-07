@@ -48,11 +48,13 @@ pnpm run build
 
 See `mise.toml` for `dev:server/dev:ui/build/test/lint/typecheck/clean/staging`.
 
-The current source includes `mise run release:prepare`: dry-run minor by default, explicit patch while pre-1.0, and explicit major only when the workspace is already 1.0+. Non-first bumps require maintainer-installed `cargo-release` 0.25.20 on PATH; first-release `0.1.0 --first-release` verifies the version and no-ops without requiring `cargo-release`. The workflow does not install the tool automatically. Moving from 0.x to 1.0 requires a separate, explicitly approved stability PLAN and a one-time manual workspace version change; it is not a routine automated bump.
+The current source includes `mise run release:prepare`: dry-run minor by default, explicit patch while pre-1.0, and explicit major only when the workspace is already 1.0+. Non-first bumps require maintainer-installed `cargo-release` 1.1.7 on PATH; first-release `0.1.0 --first-release` verifies the version and no-ops without requiring `cargo-release`. The workflow does not install the tool automatically. Moving from 0.x to 1.0 requires a separate, explicitly approved stability PLAN and a one-time manual workspace version change; it is not a routine automated bump.
+
+Install the pinned version with `cargo install cargo-release --version 1.1.7 --locked` (it lands in `~/.cargo/bin`).
 
 ## Staging 与 E2E（真实数据手册）
 
-- **当前工作树的 CLI 数据选择实现**：source build 缺省 dev，默认 `.staging/dev-001/xingshu-dev.db`；CLI 使用独立 resolver；`--db` > `XINGSHU_DB` > build/environment default。prod 指向 `.staging/` 时拒绝。
+- **当前工作树的 CLI 数据选择实现**：source build 缺省 dev，默认 `.staging/dev-001/xingshu-dev.db`；CLI 使用独立 resolver；`--db` > `XINGSHU_DB` > build/environment default。prod 下拒绝 **cwd 相对 `.staging/` 之下**（`<cwd>/.staging/**`）的库路径；判定是三值 verdict（`Inside`/`Outside`/`Undetermined`），无法判定归属的路径同样 fail-closed，且报错不出现 staging 措辞。依据：`crates/xingshu-core/src/config.rs:10`（`STAGING_DIR`）、`:186-192`（`check_db_allowed`/`check_db_allowed_with` → `staging_root()`）、`:194-223`（`check_db_allowed_under` 三值分支与文案）、`:225-227`（`staging_root()=to_absolute(".staging")`）、`:235-239`（`PathVerdict`）、`:243-257`（`db_path_verdict`）、`:361-367`（`to_absolute` 相对路径取 `current_dir()`）；用例 `crates/xingshu-cli/tests/cli_test.rs:504-536`（`current_dir(&cwd)` + `--db .staging/rejected.db` + prod ⇒ 拒且不建库）、`:693-714`（不可判定路径报 `cannot classify` 且不出现 staging 措辞）。
 - **v0.1.0 CLI 路径行为（源代码实现）**：官方 release CLI build 设置 `XINGSHU_CLI_BUILD_CHANNEL=release`，无 `XINGSHU_ENV` 时默认 prod；release CLI 数据库位于 OS user-data，dev 库位于 data root 的 `dev/` 子目录；源码 CLI dev 仍用 `.staging`，源码 CLI 显式 prod 用 OS user-data。`XINGSHU_ENV` 仅接受 `dev|prod`，非法值报错。Server 沿用既有 resolver：dev 默认 `.staging/dev-001/xingshu-dev.db`，prod 默认 CWD `xingshu-prod.db`，启动日志输出实际路径。首发 schema 为 v5，不导入 `.staging`；v0.1.0 用户资产仅 Windows/Linux x86_64；macOS 为实验性构建，不在该版本支持矩阵。正式二进制和当前支持平台以 XS GitHub Releases 页面为准。
 - XS CLI 的 Git 操作要求系统已安装 Git，且 `git` 可从 PATH 调用。
 - 真实数据基线只允许只读参考仓；`real-mini-001` 与 `real-edge-001` 均为 `.staging/` 合成副本（已 gitignore），双 DB 是回归基线，不属于 release 初始数据。
@@ -73,7 +75,7 @@ The current source includes `mise run release:prepare`: dry-run minor by default
 - `crates/xingshu-cli/`: CLI executable `xs` (PLAN-0587/0617; `clone/index/search/files/grep/read` available; no `xingshu` binary alias)
 - `crates/xingshu-server/`: localhost Axum API and static WebUI host
 - `webui/`: Vue/Vite + Tailwind v4 + shadcn-vue UI（组件 vendor 于 `src/components/ui/`，主题 token 见 `src/shadcn-theme.css`；新依赖用 `pnpm --ignore-workspace add <pkg>@<version>` 并过 7 天冷却与构建脚本评审；视图在 `src/views/`、业务面板在 `src/components/`、纯函数与请求封装在 `src/lib/`，`App.vue` 仅做布局与状态编排）
-- `e2e/`: Playwright CLI E2E（`playwright.config.ts` + `tests/xingshu.spec.ts` 19 用例 + `scripts/start-e2e-server.ps1`；含 dirty/diverged 冲突面板、只读 diff、标签策略来源、搬迁空间预检、open API、favicon 用例）
+- `e2e/`: Playwright CLI E2E（`playwright.config.ts` 单 `chromium` project、`workers: 1` + `tests/xingshu.spec.ts` 19 用例 + `tests/visual.spec.ts` 5 用例（PLAN-263 视觉回归）共 24 用例 + `scripts/start-e2e-server.ps1`；含 dirty/diverged 冲突面板、只读 diff、标签策略来源、搬迁空间预检、open API、favicon 用例。用例计数方法：`Select-String '(^|[^.\w])test\('`）
 - `scripts/create-test-staging.ps1`: only synthetic staging generator
 - `scripts/create-real-test-staging.ps1`: real-git staging helper（从经授权的只读参考仓生成 `.staging/` 副本）
 - `scripts/stage-sample.ps1`: guarded copy helper, dry-run by default

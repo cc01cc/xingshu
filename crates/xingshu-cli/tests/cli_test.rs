@@ -1,8 +1,29 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
+
+/// Collapse help/message wrapping so assertions do not depend on line breaks.
+fn normalize(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(windows)]
+fn unresolvable_db_path(temp: &TempDir) -> PathBuf {
+    // `?` is not a legal Windows filename character, so resolution fails with a non-NotFound
+    // error and the path cannot be classified as inside or outside staging.
+    temp.path().join("illegal?name").join("xingshu-prod.db")
+}
+
+#[cfg(unix)]
+fn unresolvable_db_path(temp: &TempDir) -> PathBuf {
+    use std::os::unix::fs::symlink;
+
+    let alias = temp.path().join("dangling-alias");
+    symlink(temp.path().join("missing"), &alias).expect("dangling symlink");
+    alias.join("xingshu-prod.db")
+}
 
 fn git(path: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -569,4 +590,148 @@ fn git_dependent_command_reports_how_to_install_git() {
         db.exists(),
         "preflight runs after the existing DB was set up"
     );
+}
+
+#[test]
+fn scan_root_help_and_error_distinguish_path_from_root_id() {
+    let temp = TempDir::new().expect("temp");
+    let root = temp.path().join("root");
+    fs::create_dir_all(&root).expect("root");
+    let db = temp.path().join("data/xingshu-test.db");
+    let binary = env!("CARGO_BIN_EXE_xs");
+
+    let scan_help = Command::new(binary)
+        .args(["scan", "--help"])
+        .output()
+        .expect("scan help");
+    assert!(scan_help.status.success(), "xs scan --help");
+    let scan_help = normalize(&String::from_utf8_lossy(&scan_help.stdout));
+    assert!(
+        scan_help.contains("PATH, not a root id") && scan_help.contains("xs roots list"),
+        "{scan_help}"
+    );
+
+    // The seven id-typed `--root` fields carry the explicit "integer, not a path" hint;
+    // the pre-existing id-typed help texts (pull/status/clone) only need to say "root id".
+    let help_checks: [(&[&str], &str); 10] = [
+        (&["list"], "Registered root id (integer, not a path)"),
+        (&["search"], "Registered root id (integer, not a path)"),
+        (&["files"], "Registered root id (integer, not a path)"),
+        (&["grep"], "Registered root id (integer, not a path)"),
+        (&["read"], "Registered root id (integer, not a path)"),
+        (
+            &["index", "update"],
+            "Registered root id (integer, not a path)",
+        ),
+        (
+            &["index", "status"],
+            "Registered root id (integer, not a path)",
+        ),
+        (&["pull"], "registered root id"),
+        (&["status"], "registered root id"),
+        (&["clone"], "registered root id"),
+    ];
+    for (args, expected) in help_checks {
+        let label = args.join(" ");
+        let help = Command::new(binary)
+            .args(args)
+            .arg("--help")
+            .output()
+            .unwrap_or_else(|error| panic!("xs {label} --help: {error}"));
+        assert!(help.status.success(), "xs {label} --help");
+        let help = normalize(&String::from_utf8_lossy(&help.stdout));
+        assert!(
+            help.to_lowercase().contains(&expected.to_lowercase()),
+            "xs {label} --help: {help}"
+        );
+    }
+
+    let setup = Command::new(binary)
+        .current_dir(temp.path())
+        .args([
+            "--db",
+            db.to_str().expect("db"),
+            "roots",
+            "add",
+            root.to_str().expect("root"),
+        ])
+        .env_remove("XINGSHU_LOG_FILE")
+        .output()
+        .expect("register root");
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+
+    let unregistered = root.join("missing");
+    let output = Command::new(binary)
+        .current_dir(temp.path())
+        .args([
+            "--db",
+            db.to_str().expect("db"),
+            "scan",
+            "--root",
+            unregistered.to_str().expect("unregistered root"),
+        ])
+        .env_remove("XINGSHU_LOG_FILE")
+        .output()
+        .expect("scan with unregistered root");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+    assert!(stderr.contains("root is not registered"), "{stderr}");
+    assert!(stderr.contains("xs roots list"), "{stderr}");
+    assert!(stderr.contains("not a root id"), "{stderr}");
+}
+
+#[test]
+fn prod_db_guard_classifies_unresolvable_path_without_staging_wording() {
+    let temp = TempDir::new().expect("temp");
+    let db = unresolvable_db_path(&temp);
+    let binary = env!("CARGO_BIN_EXE_xs");
+
+    let guarded = Command::new(binary)
+        .current_dir(temp.path())
+        .args(["--db", db.to_str().expect("db"), "db", "path"])
+        .env("XINGSHU_ENV", "prod")
+        .env_remove("XINGSHU_LOG_FILE")
+        .output()
+        .expect("prod staging guard");
+    assert_eq!(
+        guarded.status.code(),
+        Some(1),
+        "stdout: {}",
+        String::from_utf8_lossy(&guarded.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&guarded.stderr);
+    assert!(stderr.contains("cannot classify"), "{stderr}");
+    assert!(
+        !stderr.contains("refusing to open staging database"),
+        "undetermined classification must not reuse the staging message: {stderr}"
+    );
+    assert!(
+        !db.exists(),
+        "database file must not be created: {}",
+        db.display()
+    );
+
+    // dev runs are not policed by the staging guard: the command succeeds and opens nothing.
+    let dev = Command::new(binary)
+        .current_dir(temp.path())
+        .args(["--db", db.to_str().expect("db"), "db", "path"])
+        .env("XINGSHU_ENV", "dev")
+        .env_remove("XINGSHU_LOG_FILE")
+        .output()
+        .expect("dev run");
+    assert!(
+        dev.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dev.stderr)
+    );
+    assert!(!db.exists());
 }

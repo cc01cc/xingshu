@@ -8,7 +8,7 @@
 
 `v0.1.0` 是首个稳定版本号。候选快照 push 到公开 XS 仓 `release-candidate/v0.1.0` 分支后触发 push-only 候选 workflow；没有 `workflow_dispatch` 候选入口。版本保持 `0.1.0`、不创建 RC tag。Windows artifact 名为 `xingshu-candidate-x86_64-pc-windows-msvc-attempt-<run_attempt>`，Linux artifact 名为 `xingshu-candidate-x86_64-unknown-linux-gnu-attempt-<run_attempt>`，各保留 90 天且每次 attempt 不可变；每个与同一 `github.sha`、`candidateRunAttempt` 关联，内含对应归档、匹配归档的 `.sha256` 文件及 `xingshu-v0.1.0-<target>.manifest.json`；manifest 记录 `candidateRunAttempt`、`minimumOsAbi`、`buildRunner`、`crtLinkage` 和 `runtimeDependencies`。候选 artifact 只用于验证，**不是 GitHub Release，也不是稳定版**；候选只含每归档 `.sha256`，不含汇总校验文件。正式 GitHub Release 另提供汇总文件 `SHA256SUMS`。正式 CLI 二进制和当前可用版本以 XS GitHub Releases 页面为准。
 
-首发候选 artifact 与稳定 Release 只包含 Windows x86_64、Linux x86_64。Windows release target 静态链接 MSVC CRT；候选 CI 执行 `dumpbin /dependents`，若仍导入 VCRUNTIME/MSVCP/UCRT 则失败。manifest 的 `minimumOsAbi` / `buildRunner` 分别为 Windows `Windows 10+` / `windows-2025`、Linux x86_64 GNU `glibc 2.35+` / `ubuntu-22.04`；`crtLinkage` 记录 `static`，`runtimeDependencies` 记录 Windows 10+ 与 PATH 中的 Git，或 Linux glibc 2.35+、PATH 中的 Git 与 `df`（GNU coreutils，用于移动前剩余空间检查）；Linux manifest 另列 runner 上 `ldd` 的动态库 SONAME，并在依赖缺失时阻断构建。tag workflow 按 target allowlist 校验这些字段；候选 run 提供实际安装/运行证据后，平台下限才算验收。PE import 门禁通过后，Windows 不需要 VC++ Redistributable。Linux arm64 与 macOS 不属于 `v0.1.0` 用户支持目标；稳定 Release 页面是实际可用资产和支持平台的权威清单。稳定归档名为 Windows `xingshu-v0.1.0-x86_64-pc-windows-msvc.zip`、Linux `xingshu-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`。
+首发候选 artifact 与稳定 Release 只包含 Windows x86_64、Linux x86_64。Windows release target 静态链接 MSVC CRT；候选 CI 执行 `dumpbin /dependents`，若仍导入 VCRUNTIME/MSVCP/UCRT 则失败。manifest 的 `minimumOsAbi` / `buildRunner` 分别为 Windows `Windows 10+` / `windows-2025`、Linux x86_64 GNU `glibc 2.35+` / `ubuntu-22.04`；`crtLinkage` 记录 `static`，`runtimeDependencies` 记录 Windows 10+ 与 PATH 中的 Git，或 Linux glibc 2.35+、PATH 中的 Git 与 `df`（GNU coreutils，用于移动前剩余空间检查）；Linux manifest 另列 runner 上 `ldd` 的动态库 SONAME，并在依赖缺失时阻断构建。tag workflow 按 target allowlist 校验这些字段；候选 run 提供实际安装/运行证据后，平台下限才算验收。PE import 门禁通过后，Windows 不需要 VC++ Redistributable。Linux arm64 与 macOS 不在 `v0.1.0` 用户支持矩阵内：macOS 仅有实验性构建，本版本不发布 macOS 资产；稳定 Release 页面是实际可用资产和支持平台的权威清单。稳定归档名为 Windows `xingshu-v0.1.0-x86_64-pc-windows-msvc.zip`、Linux `xingshu-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`。
 
 签名与完整性：候选和稳定 manifest 的 `signatureStatus` 均为 `unsigned`，平台归档不做代码签名。Windows 可能显示 SmartScreen 或“未知发布者”警告；Linux 归档同样未签名。归档旁 `.sha256` 和 Release 的 `SHA256SUMS` 仅用于检查文件完整性，不证明发布者身份。
 
@@ -19,7 +19,7 @@
 3. 解压并将 `xs`（Windows 为 `xs.exe`）放进用户可写且位于 PATH 的目录；打开新终端运行 `xs --version`、`xs db path` 和 `git --version`。
 4. Git 是仓库操作命令的运行时依赖。当前 CLI 会在打开数据库前检查 Git；若 `git` 不在 PATH，会报 ``git command failed: Git executable not found on PATH; install Git and ensure `git` is available, then restart the terminal``。安装 Git 并重开终端后重试。`xs db path` 是例外，不依赖 Git。候选包不用于日常数据；验证时使用隔离的临时用户 profile。
 
-稳定版安装/升级资产只在候选验收并获最终用户批准后提供；release owner 将候选同一 commit fast-forward 到公开 `main` 并 push `v0.1.0` tag 触发稳定发布。卸载时移除 CLI 程序即可，用户数据目录不会随程序一并自动删除。
+稳定版安装/升级资产只在候选验收并获最终用户批准后提供；release owner 将候选同一 commit fast-forward 到公开 `main` 并 push `v0.1.0` tag 触发稳定发布。从 Releases 走到首次扫描的用户级路径见仓库根 `README.md` 的「从 Releases 安装（推荐）」一节，本文档只保留命令级细节。卸载时移除 CLI 程序即可，用户数据目录不会随程序一并自动删除。
 
 ## 版本与发布
 
@@ -27,12 +27,12 @@
 - `1.0.0` 前都属于不稳定版本：0.x 默认 bump 为 minor；维护者可以显式选 patch，仅用于不改变公开行为/配置/数据语义的修复。Agent 不能自动将默认 minor 降为 patch。
 - 0.x minor 用于新功能和破坏性 CLI/配置/默认路径/schema/data 变化；这类变化必须在 CHANGELOG 标记 `BREAKING` 并说明影响。0.x 时 `release:prepare` 拒绝 major；1.0+ 按标准 SemVer，minor 默认，维护者可显式选 patch 或 major。0.x→1.0 是单独批准的稳定性决策/PLAN，要求一次性手动修改 workspace 版本；不是常规自动 bump，当前命令没有 `--version` 参数。
 - 稳定发布仅由公开仓稳定 `v*` tag push 触发，tag 必须是无 prerelease 后缀的稳定 SemVer。候选验收并获最终批准后，release owner 将同一 commit fast-forward 到公开 `main` 并 push `v0.1.0` tag。workflow 从公开 `release-candidate/v0.1.0` 找到同一 source SHA、`run_attempt` 的成功候选 run，下载该 attempt 的不可变 artifact，按 target allowlist 核对 manifest 的 `minimumOsAbi`/`buildRunner`/`crtLinkage`/`runtimeDependencies` 字段及哈希后用原始资产创建 Release，不重建、不接收 run ID 输入、不 push 私有仓。
-- 当前源码已包含 `mise run release:prepare`：默认 dry-run + minor；首发传 `--first-release` 时先验证 workspace 为 `0.1.0`，再 no-op，不需要 `cargo-release`。非首发 bump 要求维护者手动安装 `cargo-release` 0.25.20 并加入 PATH；流程不会自动安装。0.x 可显式选择 patch，不允许 major；workspace 达到 1.0+ 后，按标准 SemVer 可显式选择 patch/major。只有 `--execute` 才写版本。该任务只调用 Cargo workspace version step 更新版本/lockfile，不发布 crate、不打 tag、不 push；CHANGELOG 由维护者按实际变更审核整理。0.x→1.0 需单独批准的稳定性 PLAN 和一次性手动 workspace version change；命令未提供 `--version` 参数。Agent 不能自动把默认 minor 降为 patch。
+- 当前源码已包含 `mise run release:prepare`：默认 dry-run + minor；首发传 `--first-release` 时先验证 workspace 为 `0.1.0`，再 no-op，不需要 `cargo-release`。非首发 bump 要求维护者手动安装 `cargo-release` 1.1.7 并加入 PATH；流程不会自动安装。安装命令：`cargo install cargo-release --version 1.1.7 --locked`（装到 `~/.cargo/bin`）。0.x 可显式选择 patch，不允许 major；workspace 达到 1.0+ 后，按标准 SemVer 可显式选择 patch/major。只有 `--execute` 才写版本。该任务只调用 Cargo workspace version step 更新版本/lockfile，不发布 crate、不打 tag、不 push；CHANGELOG 由维护者按实际变更审核整理。0.x→1.0 需单独批准的稳定性 PLAN 和一次性手动 workspace version change；命令未提供 `--version` 参数。Agent 不能自动把默认 minor 降为 patch。
 - 候选 Actions artifacts 只用于验证，不作为稳定安装包；正式 CLI 二进制及当前可用版本以 XS GitHub Releases 页面为准。
 
 ## 数据库选择
 
-**当前源码构建与 server 行为**：`xingshu-<env>.db`；dev 默认 `.staging/dev-001/xingshu-dev.db`，server 设置 `XINGSHU_ENV=prod` 时默认 `./xingshu-prod.db`。当前源码 CLI 的优先级为显式 `--db` > `XINGSHU_DB` > 默认值；prod 指向 `.staging/` 的路径会被拒绝。
+**当前源码构建与 server 行为**：`xingshu-<env>.db`；dev 默认 `.staging/dev-001/xingshu-dev.db`，server 设置 `XINGSHU_ENV=prod` 时默认 `./xingshu-prod.db`。当前源码 CLI 的优先级为显式 `--db` > `XINGSHU_DB` > 默认值；prod 指向 `.staging/` 的路径会被拒绝（`refusing to open staging database`）。无法判定归属的 `--db` 路径（非法字符、悬空符号链接/联接点、中间组件是文件等）在 prod 下同样拒绝，消息为 `cannot classify --db path <PATH> as production: <OS 原因>`；dev 运行不经过该判定，由打开层报原始错误。
 
 **v0.1.0 官方 CLI 路径行为（当前源代码实现）**：官方 release CLI 默认使用 OS 当前用户数据目录；源码 checkout CLI 的 dev 默认仍为 `.staging/dev-001/xingshu-dev.db`。`XINGSHU_ENV=dev|prod` 显式选择 CLI 运行环境，发行版的 dev/prod DB 都位于 OS 用户数据目录，非法值报错。最终优先级为显式 `--db` > `XINGSHU_DB` > build marker / 环境默认路径。首次正式运行创建 schema v5，不导入开发 `.staging` 库；FTS 搜索 sidecar 属可重建缓存。正式 CLI 二进制及当前平台支持状态以 XS GitHub Releases 页面为准。
 
@@ -42,7 +42,7 @@ server 保持独立的现有路径契约：dev 默认 `.staging/dev-001/xingshu-
 
 ## CLI 数据库备份与恢复
 
-上面的 `xs backup` 命令备份 Git 仓库，不备份 CLI 数据库。先用 `xs db path` 获取实际生效的数据库路径。官方发行版默认路径：Windows `%LOCALAPPDATA%/Xingshu/xingshu-prod.db`，dev 库 `%LOCALAPPDATA%/Xingshu/dev/xingshu-dev.db`；Linux prod 库 `${XDG_DATA_HOME:-~/.local/share}/xingshu/xingshu-prod.db`，dev 库在相同数据根下的 `dev/xingshu-dev.db`。源码 CLI 的 dev 库仍在 checkout `.staging`。macOS 不在 v0.1.0 用户支持矩阵中。
+上面的 `xs backup` 命令备份 Git 仓库，不备份 CLI 数据库。先用 `xs db path` 获取实际生效的数据库路径。官方发行版默认路径：Windows `%LOCALAPPDATA%/Xingshu/xingshu-prod.db`，dev 库 `%LOCALAPPDATA%/Xingshu/dev/xingshu-dev.db`；Linux prod 库 `${XDG_DATA_HOME:-~/.local/share}/xingshu/xingshu-prod.db`，dev 库在相同数据根下的 `dev/xingshu-dev.db`。源码 CLI 的 dev 库仍在 checkout `.staging`。macOS 仅有实验性构建，不在 v0.1.0 用户支持矩阵中，本版本不发布 macOS 资产。
 
 冷备份前停止所有可能写入该数据库的 CLI 命令和 server 进程。将 `.db` 文件及同名的 `-wal`、`-shm` sidecar（若存在）作为一组复制，保持它们的主文件名一致。FTS 搜索 sidecar 是可重建的派生数据，不必备份；如缺失或过期，可在恢复库上运行 `xs --db <RESTORED_DB> index rebuild`。
 
@@ -124,7 +124,7 @@ xs [--db <DB_PATH>] clone --root <ROOT_ID> --dest <RELATIVE_PATH> [--my-org <ORG
 xs scan [--root PATH]... [--max-depth N] [--include-nested] [--my-org ORG]...
 ```
 
-- `--root` 可重复；省略时扫描全部已注册 root。传入未注册路径 → 退出 1。
+- `--root` 有两种语义：本命令的 `--root` 收**已注册 root 路径**，逐字取自 `xs roots list` 的 `path` 字段（字面比较，不做规范化）；`list`、`clone`、`pull`、`status`、`search`、`files`、`grep`、`read`、`index` 的 `--root` 收该表中的整数 `id`。`--root` 可重复；省略时扫描全部已注册 root。传入未注册路径 → 退出 1，错误消息提示改用 `xs roots list` / `xs roots add`。
 - `--max-depth`：`0`（默认）表示不限层级。
 - `--include-nested`：索引嵌套仓库（默认只索引外层仓库）。
 - `--my-org` 可重复：remote owner 命中时首次分类为 `own`；仓库存在指向别处的 upstream 时优先判定 `fork`。

@@ -76,9 +76,9 @@ dir = "webui"
 alias = "build:ui"
 
 [tasks.test]
-depends = ["test:release-prepare"]
+depends = ["test:release-prepare", "test:render-quickstart"]
 run = "cargo test --workspace"
-description = "Run release-prep script tests and all Rust tests"
+description = "Run release-prep and render-quickstart script tests and all Rust tests"
 alias = "test"
 
 [tasks."test:ui"]
@@ -135,10 +135,15 @@ flag "--dry-run" help="Preview only (default)"
 flag "--execute" help="Apply cargo-release version step"
 '''
 run = "node scripts/release-prepare.mjs"
-description = "Preview workspace version bump; minor default, patch explicit, major at 1.0+; cargo-release 0.25.20 required for bumps, no publish/tag/push"
+description = "Preview workspace version bump; minor default, patch explicit, major at 1.0+; cargo-release 1.1.7 required for bumps, no publish/tag/push"
 alias = "release:prepare"
 
 [tasks."test:release-prepare"]
-run = "node --test scripts/tests/release-prepare.test.mjs"
+run = "node --test scripts/tests/release-prepare.test.mjs scripts/tests/release-prepare-cargo-shim.test.mjs"
 description = "Test release-preparation argument and version rules"
 alias = "test:release-prepare"
+
+[tasks."test:render-quickstart"]
+run = "node --test scripts/tests/render-quickstart.test.mjs"
+description = "Test QUICKSTART renderer placeholder, version line and repo-tree write guard"
+alias = "test:render-quickstart"

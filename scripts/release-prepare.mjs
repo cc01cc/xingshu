@@ -7,7 +7,6 @@ import {
     mkdtempSync,
     openSync,
     readFileSync,
-    rmSync,
     writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -16,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const WORKSPACE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FIRST_STABLE_VERSION = "0.1.0";
-const CARGO_RELEASE_VERSION = "0.25.20";
+const CARGO_RELEASE_VERSION = "1.1.7";
 const PACKAGE_NAMES = ["xingshu-cli", "xingshu-core", "xingshu-server"];
 const BUMP_LEVELS = new Set(["major", "minor", "patch"]);
 
@@ -113,7 +112,13 @@ export function planVersionStep(version, options) {
             "version",
             options.bump,
             "--workspace",
-            ...(options.execute ? ["--execute"] : []),
+            // cargo-release 1.1.7 asks "? [y/N]" before writing. `runFileLogged` gives the
+            // child an empty stdin, so the prompt reads EOF, the answer is "no", and the
+            // process still exits 0 with the manifests untouched (a silent no-op that used
+            // to be recorded as success). `--no-confirm` is the documented way to skip that
+            // prompt (see `cargo release version --help`). Dry runs keep the preview prompt
+            // semantics by never passing the write flags at all.
+            ...(options.execute ? ["--execute", "--no-confirm"] : []),
         ],
     };
 }
@@ -205,7 +210,20 @@ function closeOutputFiles(stdoutFd, stderrFd) {
     closeSync(stderrFd);
 }
 
-export async function runFileLogged(command, args, { cwd, timeoutMs, env } = {}) {
+export function cargoReleaseMissingError(command, args, stderr, runDirectory) {
+    if (!(command === "cargo" && args[0] === "release" && stderr.includes("no such command"))) {
+        return null;
+    }
+    const runRecordPath = path.join(runDirectory ?? "", "run.json");
+    const error = new Error(
+        `cargo-release ${CARGO_RELEASE_VERSION} is required for future minor/patch/major bumps but is not installed; no version files were changed; run record: ${runRecordPath}`,
+    );
+    error.runDirectory = runDirectory;
+    error.terminalStatus = "failed";
+    return error;
+}
+
+export async function runFileLogged(command, args, { cwd, timeoutMs, env, onRecord } = {}) {
     const runId = randomUUID();
     const outputDir = mkdtempSync(path.join(os.tmpdir(), `xs-release-prepare-${runId}-`));
     const stdoutPath = path.join(outputDir, "stdout.log");
@@ -310,6 +328,9 @@ export async function runFileLogged(command, args, { cwd, timeoutMs, env } = {})
         record.endedAt = new Date().toISOString();
         record.elapsedMs = Date.now() - startedAt.getTime();
         writeRunRecord(runRecordPath, record);
+        // Callers may need to annotate the completed record (for example when the child
+        // reported success but its intended side effect never happened).
+        onRecord?.({ path: runRecordPath, record });
         closeOutputFiles(stdoutFd, stderrFd);
         closeOutput = false;
 
@@ -325,14 +346,8 @@ export async function runFileLogged(command, args, { cwd, timeoutMs, env } = {})
         if (firstResult.code !== 0) {
             if (stdout) process.stdout.write(stdout);
             if (stderr) process.stderr.write(stderr);
-            if (command === "cargo" && args[0] === "release" && stderr.includes("no such command")) {
-                const error = new Error(
-                    `cargo-release ${CARGO_RELEASE_VERSION} is required for future minor/patch/major bumps but is not installed; no version files were changed; run record: ${runRecordPath}`,
-                );
-                error.runDirectory = outputDir;
-                error.terminalStatus = "failed";
-                throw error;
-            }
+            const missingCargoRelease = cargoReleaseMissingError(command, args, stderr, outputDir);
+            if (missingCargoRelease) throw missingCargoRelease;
             const error = new Error(
                 `${command} exited with status ${firstResult.code ?? "unknown"}; run record: ${runRecordPath}`,
             );
@@ -341,7 +356,10 @@ export async function runFileLogged(command, args, { cwd, timeoutMs, env } = {})
             throw error;
         }
 
-        rmSync(outputDir, { recursive: true, force: true });
+        // The run record outlives the process on purpose: a failed or no-op bump is
+        // exactly the case where `T1.2` needs the record path, and deleting it would
+        // erase the only evidence of what cargo-release actually did.
+        onRecord?.({ path: runRecordPath, record });
         return stdout;
     } catch (error) {
         if (timer) clearTimeout(timer);
@@ -447,9 +465,49 @@ export async function prepareRelease({
     log(
         `Running cargo ${plan.args.join(" ")} with cargo-release ${cargoReleaseVersion}. No publish, tag, commit, or push step is invoked.`,
     );
-    const output = await run("cargo", plan.args, { cwd, timeoutMs: 120_000 });
+    let versionStep;
+    const output = await run("cargo", plan.args, {
+        cwd,
+        timeoutMs: 120_000,
+        onRecord(record) {
+            versionStep = record;
+        },
+    });
     if (output) log(output.trimEnd());
+
+    if (!options.execute) return plan;
+
+    // Anti-false-green check: "the tool exited 0" is not evidence that it did anything.
+    // cargo-release can end successfully after declining its own confirmation prompt, so
+    // the version is re-read from the manifests and compared with the pre-run value.
+    const appliedVersion = await readWorkspaceVersion({ cwd, run });
+    if (appliedVersion === version) {
+        const detail = `cargo ${plan.args.join(" ")} exited 0 but the workspace version is still ${version}`;
+        const noOpRecordPath = markNoOpRecord(versionStep, detail);
+        const error = new Error(
+            `${detail}; refusing to report success${noOpRecordPath ? ` (run record: ${noOpRecordPath})` : ""}`,
+        );
+        error.terminalStatus = "failed";
+        if (noOpRecordPath) error.runDirectory = path.dirname(noOpRecordPath);
+        throw error;
+    }
+
+    log(
+        `Workspace version ${version} → ${appliedVersion}; run record: ${versionStep?.path ?? "unavailable"}`,
+    );
     return plan;
+}
+
+function markNoOpRecord(versionStep, detail) {
+    if (!versionStep?.path || !versionStep.record) return null;
+    const failed = {
+        ...versionStep.record,
+        terminalStatus: "failed",
+        outcome: "no-op",
+        detail,
+    };
+    writeRunRecord(versionStep.path, failed);
+    return versionStep.path;
 }
 
 async function main() {

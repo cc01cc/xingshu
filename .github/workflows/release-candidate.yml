@@ -245,9 +245,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item -LiteralPath $binary -Destination (Join-Path $stage "xs.exe")
           Copy-Item -LiteralPath "LICENSE" -Destination (Join-Path $stage "LICENSE")
+          # QUICKSTART.md 渲染进候选 stage（PLAN-0692 F4）：--out 指向 stage，仓库树不写
+          node scripts/render-quickstart.mjs --version $version --out (Join-Path $stage "QUICKSTART.md")
+          if ($LASTEXITCODE -ne 0) { throw "QUICKSTART.md render failed with exit code $LASTEXITCODE" }
           $asset = "xingshu-v$version-$env:RUST_TARGET.zip"
           $assetPath = Join-Path $env:RUNNER_TEMP $asset
+          # 保持 "-Path (Join-Path $stage "*")"：打包的是 stage 目录的内容条目；改成 -Path $stage 会给每个条目加 xs-candidate-stage/ 前缀（PLAN-0692 F6）
           Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $assetPath -Force
+          # 归档内容断言读 zip 条目名（不断言 stage 目录）：恰好 LICENSE / QUICKSTART.md / xs.exe，且无目录条目
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($assetPath)
+          try {
+            $zipEntries = @($zip.Entries | ForEach-Object { $_.FullName } | Sort-Object)
+            $zipDirectoryEntries = @($zip.Entries | Where-Object { $_.FullName.EndsWith("/") }).Count
+          } finally {
+            $zip.Dispose()
+          }
+          Write-Output "zip_entries=$($zipEntries -join ',') directory_entries=$zipDirectoryEntries"
+          if ($zipDirectoryEntries -ne 0) { throw "candidate zip must not contain directory entries, found $zipDirectoryEntries" }
+          if (($zipEntries -join ',') -ne "LICENSE,QUICKSTART.md,xs.exe") { throw "unexpected candidate zip entries: $($zipEntries -join ',')" }
           $hash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksumPath = "$assetPath.sha256"
           [System.IO.File]::WriteAllText($checksumPath, "${hash}  ${asset}`n", [System.Text.ASCIIEncoding]::new())
@@ -262,6 +277,7 @@ jobs:
             target = $env:RUST_TARGET
             assetName = $asset
             assetSha256 = $hash
+            archiveEntries = $zipEntries
             minimumOsAbi = "Windows 10+"
             buildRunner = $env:BUILD_RUNNER
             crtLinkage = "static"
@@ -417,14 +433,22 @@ jobs:
           mkdir -p "$stage"
           cp "$binary" "$stage/xs"
           cp LICENSE "$stage/LICENSE"
+          # QUICKSTART.md 渲染进候选 stage（PLAN-0692 F4）：与 Windows 侧同一命令、同一参数
+          node scripts/render-quickstart.mjs --version "$version" --out "$stage/QUICKSTART.md"
           asset="xingshu-v${version}-${RUST_TARGET}.tar.gz"
           asset_path="$RUNNER_TEMP/$asset"
-          tar -czf "$asset_path" -C "$stage" xs LICENSE
+          # 显式文件名清单必须与 Windows 侧同批加件（PLAN-0692 F6）：xs LICENSE QUICKSTART.md
+          tar -czf "$asset_path" -C "$stage" xs LICENSE QUICKSTART.md
+          # 归档内容断言：tar 条目名排序后必须恰好三项（多一层目录、少一个文件都判红）
+          tar -tzf "$asset_path" | LC_ALL=C sort > "$RUNNER_TEMP/tar-entries.txt"
+          printf 'LICENSE\nQUICKSTART.md\nxs\n' | LC_ALL=C sort > "$RUNNER_TEMP/tar-entries-expected.txt"
+          printf 'tar_entries=%s\n' "$(paste -sd, "$RUNNER_TEMP/tar-entries.txt")"
+          diff -u "$RUNNER_TEMP/tar-entries-expected.txt" "$RUNNER_TEMP/tar-entries.txt"
           hash="$(sha256sum "$asset_path" | awk '{print $1}')"
           checksum_path="$asset_path.sha256"
           printf '%s  %s\n' "$hash" "$asset" > "$checksum_path"
           manifest_path="$RUNNER_TEMP/xingshu-v${version}-${RUST_TARGET}.manifest.json"
-          MANIFEST_PATH="$manifest_path" ASSET_NAME="$asset" ASSET_HASH="$hash" VERSION="$version" TARGET="$RUST_TARGET" GIT_VERSION="$git_version" DYNAMIC_LIBRARIES_JSON="$dynamic_libraries_json" node --input-type=module -e '
+          MANIFEST_PATH="$manifest_path" ASSET_NAME="$asset" ASSET_HASH="$hash" VERSION="$version" TARGET="$RUST_TARGET" GIT_VERSION="$git_version" DYNAMIC_LIBRARIES_JSON="$dynamic_libraries_json" ARCHIVE_ENTRIES_PATH="$RUNNER_TEMP/tar-entries.txt" node --input-type=module -e '
           import fs from "node:fs";
           const manifest = {
             schemaVersion: 1,
@@ -436,6 +460,7 @@ jobs:
             target: process.env.TARGET,
             assetName: process.env.ASSET_NAME,
             assetSha256: process.env.ASSET_HASH,
+            archiveEntries: fs.readFileSync(process.env.ARCHIVE_ENTRIES_PATH, "utf8").split("\n").filter(Boolean),
             minimumOsAbi: "glibc 2.35+",
             buildRunner: process.env.BUILD_RUNNER,
             crtLinkage: "dynamic-glibc",

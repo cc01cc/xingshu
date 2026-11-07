@@ -1,5 +1,7 @@
 # 星枢 Xingshu
 
+简体中文 | [English](README.en.md)
+
 星枢是项目与资源的本地索引和管理中枢。当前首先支持 Git 仓库，面向分布在多个目录、磁盘、组织和远程上的大量项目，提供 SQLite 元数据、领域标签、差异化更新策略、冲突保护和本地 WebUI。
 
 “星”取群星意象：每个项目或资源单元像一颗独立的星，彼此独立却共同构成项目星群；“枢”取中枢、枢纽与索引枢轴之意，表达将这些群星汇聚、发现、索引、分类和管理。星枢是项目自拟的原创组合，受“天枢”等天文意象启发，但不是古籍固定专名。英文释义为 *the stellar hub*。
@@ -12,13 +14,41 @@
 
 首个稳定 CLI 版本号为 `0.1.0`。XS GitHub Releases 页面列出稳定资产和当前可用版本；只有页面列出的二进制适用于对应平台。
 
-候选快照 push 到公开仓 `release-candidate/v0.1.0` 分支后自动触发候选构建；不依赖 `workflow_dispatch` 或本地 GH CLI。候选只为 Windows x86_64 和 Linux x86_64 生成；最低运行环境为 Windows 10+（Rust MSVC target baseline）和 Linux GNU glibc 2.35+（Ubuntu 22.04 baseline）。只有候选 run 提供安装/运行证据后，这些平台下限才算验收；Windows release target 静态链接 MSVC CRT；候选 CI 执行 `dumpbin /dependents`，若仍导入 VCRUNTIME/MSVCP/UCRT 则失败。manifest 记录 `crtLinkage=static` 与运行依赖：Windows 10+ 和 Git on PATH，Linux glibc 2.35+、Git 和 `df` on PATH（`df` 由 GNU coreutils 提供，用于移动前的剩余空间检查）；Linux manifest 还记录 runner 上 `ldd` 得到的动态库 SONAME 列表，并在有 unresolved dependency 时失败。tag workflow 按 target allowlist 校验 manifest 字段；候选导入检查通过后，Windows 不需要 VC++ Redistributable。实际可用资产和支持平台以 Releases 页面为准。每次运行的 artifact 分别命名为 `xingshu-candidate-x86_64-pc-windows-msvc-attempt-<run_attempt>` 和 `xingshu-candidate-x86_64-unknown-linux-gnu-attempt-<run_attempt>`，保留 90 天且每次 attempt 独立不可变。每个 artifact 对应同一 `github.sha` 和 `candidateRunAttempt`，并含稳定资产命名的归档（`xingshu-v0.1.0-x86_64-pc-windows-msvc.zip` 或 `xingshu-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`）、匹配归档的 `.sha256` 文件及 `xingshu-v0.1.0-<target>.manifest.json`；manifest 记录 `minimumOsAbi`、`buildRunner`、`crtLinkage` 和 `runtimeDependencies`。候选 artifact 仅包含每归档校验文件；稳定 GitHub Release 还提供汇总校验文件 `SHA256SUMS`。单个归档的直接校验仍对照其相邻的 `.sha256` 文件。Windows 的值为 `Windows 10+` / `windows-2025`，Linux GNU 为 `glibc 2.35+` / `ubuntu-22.04`。候选和稳定 manifest 的 `signatureStatus` 均为 `unsigned`，发布资产不做代码签名。Windows 可能显示 SmartScreen/未知发布者警告，Linux 归档也未签名。`.sha256` 与 `SHA256SUMS` 只校验文件完整性，不认证发布者身份。候选显示 `0.1.0`，不创建 `-rc` 版本或 tag；artifact 只用于验证，**不是公开 Release**。macOS 与 Linux arm64 不属于 `v0.1.0` 用户支持目标。
+当前发布版本为 `v0.1.1`：从 Releases 页面下载对应平台资产，安装步骤见下文“从 Releases 安装（推荐）”。
+
+候选快照 push 到公开仓 `release-candidate/v0.1.0` 分支后自动触发候选构建；不依赖 `workflow_dispatch` 或本地 GH CLI。候选只为 Windows x86_64 和 Linux x86_64 生成；最低运行环境为 Windows 10+（Rust MSVC target baseline）和 Linux GNU glibc 2.35+（Ubuntu 22.04 baseline）。只有候选 run 提供安装/运行证据后，这些平台下限才算验收；Windows release target 静态链接 MSVC CRT；候选 CI 执行 `dumpbin /dependents`，若仍导入 VCRUNTIME/MSVCP/UCRT 则失败。manifest 记录 `crtLinkage=static` 与运行依赖：Windows 10+ 和 Git on PATH，Linux glibc 2.35+、Git 和 `df` on PATH（`df` 由 GNU coreutils 提供，用于移动前的剩余空间检查）；Linux manifest 还记录 runner 上 `ldd` 得到的动态库 SONAME 列表，并在有 unresolved dependency 时失败。tag workflow 按 target allowlist 校验 manifest 字段；候选导入检查通过后，Windows 不需要 VC++ Redistributable。实际可用资产和支持平台以 Releases 页面为准。每次运行的 artifact 分别命名为 `xingshu-candidate-x86_64-pc-windows-msvc-attempt-<run_attempt>` 和 `xingshu-candidate-x86_64-unknown-linux-gnu-attempt-<run_attempt>`，保留 90 天且每次 attempt 独立不可变。每个 artifact 对应同一 `github.sha` 和 `candidateRunAttempt`，并含稳定资产命名的归档（`xingshu-v0.1.0-x86_64-pc-windows-msvc.zip` 或 `xingshu-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`）、匹配归档的 `.sha256` 文件及 `xingshu-v0.1.0-<target>.manifest.json`；manifest 记录 `minimumOsAbi`、`buildRunner`、`crtLinkage` 和 `runtimeDependencies`。候选 artifact 仅包含每归档校验文件；稳定 GitHub Release 还提供汇总校验文件 `SHA256SUMS`。单个归档的直接校验仍对照其相邻的 `.sha256` 文件。Windows 的值为 `Windows 10+` / `windows-2025`，Linux GNU 为 `glibc 2.35+` / `ubuntu-22.04`。候选和稳定 manifest 的 `signatureStatus` 均为 `unsigned`，发布资产不做代码签名。Windows 可能显示 SmartScreen/未知发布者警告，Linux 归档也未签名。`.sha256` 与 `SHA256SUMS` 只校验文件完整性，不认证发布者身份。候选显示 `0.1.0`，不创建 `-rc` 版本或 tag；artifact 只用于验证，**不是公开 Release**。macOS 仅有实验性构建：本版本不发布 macOS 资产，也不在用户支持矩阵内；Linux arm64 同样不在支持矩阵内。
 
 候选验收并获最终用户批准后，release owner 将同一候选 commit fast-forward 到公开 `main` 并 push `v0.1.0` tag。稳定发布 workflow 只接受不带 prerelease 后缀的稳定 SemVer tag；它会从 `release-candidate/v0.1.0` 查找相同 source SHA、候选 workflow 与 `run_attempt` 的成功候选，下载该 attempt 的不可变 artifact，核验 manifest、哈希及 `minimumOsAbi`/`buildRunner`/`crtLinkage`/`runtimeDependencies` 是否符合 target allowlist，再用原始资产创建 GitHub Release；不重建资产，也不依赖手动 run ID 输入或推送私有 `origin`。
 
-当前源码已包含 `mise run release:prepare`：默认 dry-run + minor；维护者显式指定 `--bump patch` 时选择 patch，只有显式 `--execute` 才改版本。首发 `--first-release` 验证 workspace 为 `0.1.0` 后 no-op，不需要 `cargo-release`。非首发 bump 需维护者手动准备 `cargo-release` 0.25.20 并加入 PATH；流程不自动安装。workspace 仍为 0.x 时拒绝 `--bump major`；达到 1.0+ 后可按标准 SemVer 显式选择 patch 或 major，默认仍为 minor。0.x 到 1.0 是独立的稳定性决策/PLAN，要求一次性手动修改 workspace 版本；不是常规自动 bump，当前没有 `--version` 参数。该任务只调用 Cargo workspace version step，不发布 crate、不打 tag、不 push。Agent 不会自动把默认 minor 降为 patch。候选 Actions artifacts 只用于验证；正式 CLI 二进制与当前可用版本以 GitHub Releases 页面为准。
+当前源码已包含 `mise run release:prepare`：默认 dry-run + minor；维护者显式指定 `--bump patch` 时选择 patch，只有显式 `--execute` 才改版本。首发 `--first-release` 验证 workspace 为 `0.1.0` 后 no-op，不需要 `cargo-release`。非首发 bump 需维护者手动准备 `cargo-release` 1.1.7 并加入 PATH；流程不自动安装。workspace 仍为 0.x 时拒绝 `--bump major`；达到 1.0+ 后可按标准 SemVer 显式选择 patch 或 major，默认仍为 minor。0.x 到 1.0 是独立的稳定性决策/PLAN，要求一次性手动修改 workspace 版本；不是常规自动 bump，当前没有 `--version` 参数。该任务只调用 Cargo workspace version step，不发布 crate、不打 tag、不 push。Agent 不会自动把默认 minor 降为 patch。候选 Actions artifacts 只用于验证；正式 CLI 二进制与当前可用版本以 GitHub Releases 页面为准。
+
+安装该钉版：`cargo install cargo-release --version 1.1.7 --locked`（安装到 `~/.cargo/bin`）。
 
 CLI 运行时需要系统 Git，并要求 `git` 可从命令行找到。当前源码包含 CLI 专属环境解析及 `xs db path`。目标中，正式 CLI 使用当前用户的数据目录，源码开发 CLI 使用 `.staging`；server 保持既有数据库路径契约。正式 CLI 二进制和当前平台可用性以 GitHub Releases 页面为准；详见 CLI 配置文档。
+
+## 从 Releases 安装（推荐）
+
+普通用户从 Releases 安装即可；本节是发布二进制路径，[Quick Start](#quick-start) 是源码构建路径。两条路径的数据目录不同：**发布二进制用 OS 用户数据目录，源码构建的开发库在 checkout 的 `.staging`**。
+
+1. 从 XS GitHub Releases 页面下载对应平台的归档。稳定归档命名形如 `xingshu-v<version>-<target>`，当前发布的是 `xingshu-v0.1.1-x86_64-pc-windows-msvc.zip`（Windows 10+）和 `xingshu-v0.1.1-x86_64-unknown-linux-gnu.tar.gz`（Linux GNU，glibc 2.35+）；同一 Release 还提供 `SHA256SUMS`、每个归档相邻的 `.sha256` 文件与按 target 区分的 manifest。
+2. 解压前先校验完整性。Linux：用 `sha256sum -c` 对照 `SHA256SUMS` 中该归档那一行；Windows：用 `Get-FileHash .\xingshu-v0.1.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256` 与 `SHA256SUMS` 对应行比对。资产未签名，`SHA256SUMS` 与 `.sha256` 只校验完整性、不认证发布者；Windows 可能弹出 SmartScreen 或未知发布者提示。
+3. 把 `xs` 放到 `PATH`。Windows：新建 `%LOCALAPPDATA%\Programs\xingshu` 之类的目录，移入 `xs.exe`，再把该目录加入用户 `PATH`；Linux：`mkdir -p ~/.local/bin && mv xs ~/.local/bin/ && chmod +x ~/.local/bin/xs`，然后在新终端确认 `xs` 可解析。
+4. 在新终端确认二进制与其 Git 前置依赖：`xs --version` 应输出 `xs 0.1.1`；`git --version` 必须可用——扫描、索引与 `grep` 都调用系统 `git`。
+5. 注册 root、扫描并建索引：
+
+```console
+$ xs roots add ./repos
+registered root 1
+$ xs roots list
+$ xs scan --root ./repos
+$ xs list
+$ xs index update --root 1
+```
+
+- `xs roots list` 输出 JSON。`xs scan --root` 收**已注册 root 的路径，逐字取自该输出 `path` 字段**（字面比较，不做规范化：分隔符、大小写、结尾分隔符都照抄）。`list`、`search`、`files`、`grep`、`read`、`index`、`pull`、`status`、`clone` 的 `--root` 收整数 `id`。未注册路径退出码为 1，报 `root is not registered`，并提示 `xs roots list` / `xs roots add <PATH>`。
+- 发布二进制的数据库在 OS 用户数据目录（Windows `%LOCALAPPDATA%\Xingshu\xingshu-prod.db`，Linux `${XDG_DATA_HOME:-~/.local/share}/xingshu/xingshu-prod.db`），dev 库在同一数据根的 `dev/` 子目录；源码构建的开发库在 checkout `.staging`。用 `xs db path` 查看实际生效的路径。
+- macOS 仅有实验性构建：本版本不发布 macOS 资产，也不在用户支持矩阵内。Linux arm64 同样不在支持矩阵内。
+- 卸载只移除程序（`xs.exe` 或 `~/.local/bin/xs`）；删除用户数据目录是单独的显式步骤。`xs` 不写注册表，也不写这两个位置以外的文件。
 
 ## Quick Start
 
@@ -74,9 +104,11 @@ xs backup restore <repo> <backup-path>
 xs backup prune <repo> --keep N [--execute]
 ```
 
+`--root` 有两种语义，不要混用：`scan --root <PATH>` 收**已注册 root 的路径，逐字取自 `xs roots list` 的 `path` 字段**（字面比较，不做规范化）；`list` / `clone` / `pull` / `status` / `search` / `files` / `grep` / `read` / `index` 的 `--root <ID>` 收该表中的整数 `id`。传入未注册路径会以退出码 1 报 `root is not registered`，并提示 `xs roots list` / `xs roots add`。
+
 ## CLI 数据库备份与恢复
 
-上面的 `xs backup` 命令备份的是 Git 仓库快照，不是 CLI 数据库。用 `xs db path` 确认 CLI 当前选中的数据库。官方发行版的默认路径为：Windows `%LOCALAPPDATA%/Xingshu/xingshu-prod.db`，Linux `${XDG_DATA_HOME:-~/.local/share}/xingshu/xingshu-prod.db`；dev 库在相同数据根下的 `dev/xingshu-dev.db`。源码 CLI 的 dev 库仍使用 `.staging`。macOS 不在 v0.1.0 用户支持矩阵中。
+上面的 `xs backup` 命令备份的是 Git 仓库快照，不是 CLI 数据库。用 `xs db path` 确认 CLI 当前选中的数据库。官方发行版的默认路径为：Windows `%LOCALAPPDATA%/Xingshu/xingshu-prod.db`，Linux `${XDG_DATA_HOME:-~/.local/share}/xingshu/xingshu-prod.db`；dev 库在相同数据根下的 `dev/xingshu-dev.db`。源码 CLI 的 dev 库仍使用 `.staging`。macOS 仅有实验性构建：本版本不发布 macOS 资产，也不在用户支持矩阵内。
 
 冷备份前，停止所有可能写入该数据库的 CLI 命令和 server 进程。将 `.db` 文件与同名的 `-wal`、`-shm` sidecar（若存在）作为一组复制，保持文件主名一致。FTS 搜索 sidecar 是可重建的派生缓存，不必纳入备份；需要时可用 `xs --db <RESTORED_DB> index rebuild` 重建。
 

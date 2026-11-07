@@ -10,7 +10,9 @@
 - [日志与审计](DEV-004-logging.md)
 - [开发与测试](DEV-005-development-testing.md)
 - [WebUI 使用](USER-001-webui.md)
+- [备份与输出可读性](DEV-006-backup-output.md)
 - [HTTP API](../../api/openapi.yaml)
+- [English README](../../../README.en.md)
 
 ## 状态
 

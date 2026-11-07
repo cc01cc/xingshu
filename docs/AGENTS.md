@@ -12,6 +12,7 @@ This directory contains documentation specific to the Xingshu project. The works
 | Logging and audit | `i18n/zh-Hans/DEV-004-logging.md` |
 | Development and testing | `i18n/zh-Hans/DEV-005-development-testing.md` |
 | WebUI usage | `i18n/zh-Hans/USER-001-webui.md` |
+| Backup and output readability | `i18n/zh-Hans/DEV-006-backup-output.md` |
 | HTTP API | `api/openapi.yaml` |
 
 English documents are maintained in the matching `i18n/en/` paths. Each language document must state its synchronization status when content differs.

@@ -1,6 +1,8 @@
 # 备份与输出可读性
 
 > 对应根 skill：`readable-output`
+>
+> 英文对应：[`en/DEV-006-backup-output.md`](../en/DEV-006-backup-output.md)（英文侧参考文献只列符号名；本文行号待下一文档批次校准）
 
 ## 冲突分类（PLAN-250）
 

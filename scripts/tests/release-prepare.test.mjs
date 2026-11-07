@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
     assertCargoReleaseVersion,
+    cargoReleaseMissingError,
     parseOptions,
     planVersionStep,
     prepareRelease,
@@ -66,15 +67,43 @@ test("allows a maintainer to explicitly select patch", () => {
     assert.deepEqual(plan.args, ["release", "version", "patch", "--workspace"]);
 });
 
-test("requires the pinned cargo-release tool version for non-first releases", () => {
-    assert.equal(assertCargoReleaseVersion("cargo-release 0.25.20"), "0.25.20");
+test("accepts the pinned cargo-release 1.1.7 and rejects every other version", () => {
+    assert.equal(assertCargoReleaseVersion("cargo-release 1.1.7"), "1.1.7");
+    assert.equal(assertCargoReleaseVersion("cargo release v1.1.7"), "1.1.7");
     assert.throws(
-        () => assertCargoReleaseVersion("cargo-release 1.1.7"),
-        /cargo-release 0\.25\.20 is required/,
+        () => assertCargoReleaseVersion("cargo-release 0.25.20"),
+        /cargo-release 1\.1\.7 is required/,
     );
     assert.throws(
-        () => assertCargoReleaseVersion("cargo release tool missing"),
+        () => assertCargoReleaseVersion("cargo-release 1.1.6"),
+        /cargo-release 1\.1\.7 is required/,
+    );
+});
+
+test("keeps the original error when the version output cannot be parsed", () => {
+    assert.throws(
+        () => assertCargoReleaseVersion("garbage"),
         /could not determine the installed cargo-release version/,
+    );
+});
+
+test("fails closed with the pinned version when cargo-release is not installed", () => {
+    const error = cargoReleaseMissingError(
+        "cargo",
+        ["release", "--version"],
+        "error: no such command: `release`\n",
+        "/tmp/xs-release-run",
+    );
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /cargo-release 1\.1\.7 is required for future minor\/patch\/major bumps/);
+    assert.match(error.message, /is not installed/);
+    assert.match(error.message, /run record: .*run\.json/);
+    assert.equal(error.terminalStatus, "failed");
+    assert.equal(error.runDirectory, "/tmp/xs-release-run");
+
+    assert.equal(
+        cargoReleaseMissingError("cargo", ["release", "--version"], "network unreachable", "/tmp/x"),
+        null,
     );
 });
 
@@ -172,16 +201,18 @@ test("dry-run never passes cargo-release execute flags or non-version steps", ()
     assert.equal(plan.args.includes("push"), false);
 });
 
-test("execute only runs cargo-release workspace version step", async () => {
+test("execute only runs cargo-release workspace version step and skips its prompt", async () => {
     const calls = [];
+    let bumped = false;
     const result = await prepareRelease({
         argv: ["--bump", "patch", "--execute"],
         cwd: "/tmp/xingshu",
         run(command, args) {
             calls.push({ command, args });
-            if (args[0] === "metadata") return cargoMetadata("0.2.0");
-            if (args[0] === "release" && args[1] === "--version") return "cargo-release 0.25.20";
+            if (args[0] === "metadata") return cargoMetadata(bumped ? "0.2.1" : "0.2.0");
+            if (args[0] === "release" && args[1] === "--version") return "cargo-release 1.1.7";
             if (args[0] === "status") return "";
+            bumped = true;
             return "version preview";
         },
         log() {},
@@ -192,8 +223,41 @@ test("execute only runs cargo-release workspace version step", async () => {
         ["metadata", "--no-deps", "--locked", "--format-version", "1"],
         ["release", "--version"],
         ["status", "--porcelain", "--untracked-files=all"],
-        ["release", "version", "patch", "--workspace", "--execute"],
+        ["release", "version", "patch", "--workspace", "--execute", "--no-confirm"],
+        ["metadata", "--no-deps", "--locked", "--format-version", "1"],
     ]);
+});
+
+test("execute fails closed when cargo-release exits 0 without changing the version", async () => {
+    const recordDirectory = mkdtempSync(path.join(os.tmpdir(), "xs-release-noop-test-"));
+    const recordPath = path.join(recordDirectory, "run.json");
+    try {
+        await assert.rejects(
+            () =>
+                prepareRelease({
+                    argv: ["--bump", "patch", "--execute"],
+                    cwd: "/tmp/xingshu",
+                    run(command, args, options) {
+                        if (args[0] === "metadata") return cargoMetadata("0.2.0");
+                        if (args[0] === "release" && args[1] === "--version") return "cargo-release 1.1.7";
+                        if (args[0] === "status") return "";
+                        options?.onRecord?.({
+                            path: recordPath,
+                            record: { terminalStatus: "completed", command: ["cargo", ...args] },
+                        });
+                        return "version preview";
+                    },
+                    log() {},
+                }),
+            /exited 0 but the workspace version is still 0\.2\.0; refusing to report success/,
+        );
+        const record = JSON.parse(readFileSync(recordPath, "utf8"));
+        assert.equal(record.terminalStatus, "failed");
+        assert.equal(record.outcome, "no-op");
+        assert.match(record.detail, /exited 0 but the workspace version is still 0\.2\.0/);
+    } finally {
+        rmSync(recordDirectory, { recursive: true, force: true });
+    }
 });
 
 test("execute refuses to change versions in a dirty worktree", async () => {
@@ -206,7 +270,7 @@ test("execute refuses to change versions in a dirty worktree", async () => {
                 run(command, args) {
                     calls.push({ command, args });
                     if (args[0] === "metadata") return cargoMetadata("0.2.0");
-                    if (args[0] === "release" && args[1] === "--version") return "cargo-release 0.25.20";
+                    if (args[0] === "release" && args[1] === "--version") return "cargo-release 1.1.7";
                     if (args[0] === "status") return " M CHANGELOG.md";
                     throw new Error("cargo-release version step must not run for a dirty tree");
                 },
